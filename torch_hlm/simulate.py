@@ -45,7 +45,7 @@ def simulate_raneffects(num_groups: int,
     y_actual = (raneffects[group_idx] * Xi).sum(1)
 
     # create data-frame
-    df = pd.DataFrame(X, columns=[f'x{i}' for i in range(1, num_raneffects + 1)])
+    df = pd.DataFrame(X, columns=[f'x{i}' for i in range(1, num_raneffects)])
     df['y'] = y_actual
     df['group'] = group_idx
     return df

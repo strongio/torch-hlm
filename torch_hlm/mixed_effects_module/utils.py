@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, Sequence
 
 import torch
 import numpy as np
@@ -35,3 +35,27 @@ def log_chol_to_chol(log_diag: torch.Tensor, off_diag: torch.Tensor) -> torch.Te
             L[..., i, j] = off_diag[..., idx]
             idx += 1
     return L
+
+
+def chunk_grouped_data(*tensors, group_ids: Sequence):
+    """
+    XXX
+    :param tensors:
+    :param group_ids:
+    :return:
+    """
+    group_ids = validate_1d_like(np.asanyarray(group_ids))
+
+    # torch.split requires we put groups into contiguous chunks:
+    sort_idx = np.argsort(group_ids)
+    group_ids = group_ids[sort_idx]
+    tensors = [x[sort_idx] for x in tensors]
+
+    # much faster approach to chunking than something like `[X[gid==group_ids] for gid in np.unique(group_ids)]`:
+    _, counts_per_group = np.unique(group_ids, return_counts=True)
+    counts_per_group = counts_per_group.tolist()
+
+    group_data = []
+    for chunk_tensors in zip(*(torch.split(x, counts_per_group) for x in tensors)):
+        group_data.append(chunk_tensors)
+    return group_data

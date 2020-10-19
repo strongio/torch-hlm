@@ -1,69 +1,21 @@
-from typing import Union, Optional, Sequence, Iterator
+from collections import OrderedDict
+from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type
+from warnings import warn
 
 import torch
 import numpy as np
+
 from tqdm.auto import tqdm
 
-from .utils import log_chol_to_chol, ndarray_to_tensor, validate_1d_like
-
-
-class _Evaluator:
-    """
-    Creates a `closure` for `torch.nn.Optimizer.step()` which clears the gradient, re-evaluates the model, and returns
-    the loss
-    """
-
-    def __init__(self,
-                 module: 'MixedEffectsModule',
-                 X: torch.Tensor,
-                 y: torch.Tensor,
-                 group_ids: Sequence,
-                 optimizer: torch.optim.Optimizer,
-                 **kwargs):
-        self.module = module
-        self.X = X
-        self.y = y
-        self.group_ids = group_ids
-        self.optimizer = optimizer
-        self.group_data = module.make_group_data(X, y, group_ids)
-        self.static_re_solve_kwargs = module._static_re_solve_kwargs(self.group_data, **kwargs)
-        self.progress = None
-        if isinstance(optimizer, torch.optim.LBFGS):
-            self.progress = tqdm(total=optimizer.param_groups[0]['max_eval'] * 2)
-        else:
-            self.progress = tqdm()
-        self.epoch = None
-
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch
-        if self.progress:
-            self.progress.reset()
-            self.progress.set_description(f"Epoch {epoch:,}")
-
-    def _get_res_per_group(self, **kwargs) -> torch.Tensor:
-        re_solve_kwargs = self.module._re_solve_kwargs(
-            self.group_data, static_kwargs=self.static_re_solve_kwargs
-        )
-        re_solve_kwargs.update(kwargs)
-        return self.module._re_solve(**re_solve_kwargs)
-
-    def __call__(self) -> torch.Tensor:
-        self.optimizer.zero_grad()
-        res_per_group_mat = self._get_res_per_group()
-        pred = self.module(X=self.X, group_ids=self.group_ids, res_per_group=res_per_group_mat)
-        loss = self.module.get_loss(pred, self.y, res_per_group=res_per_group_mat)
-        loss.backward()
-        if self.progress:
-            self.progress.update()
-            self.progress.set_description(f"Epoch {self.epoch:,}; Loss {loss.item():.4}")
-        return loss
+from .utils import log_chol_to_chol, ndarray_to_tensor, validate_1d_like, chunk_grouped_data
 
 
 class MixedEffectsModule(torch.nn.Module):
     """
     Base-class for a torch.nn.Module that can be trained with mixed-effects
     """
-    evaluator_cls = _Evaluator
+    solver_cls: Type['ReSolver'] = None
+    _single_gf_name = 'group'
 
     @classmethod
     def from_name(cls, nm: str, *args, **kwargs):
@@ -78,14 +30,13 @@ class MixedEffectsModule(torch.nn.Module):
 
     def __init__(self,
                  fixeff_features: Union[int, Sequence],
-                 raneff_features: Optional[Union[int, Sequence]],
+                 raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
                  verbose: int = 1):
         """
         :param fixeff_features: Count, or column-indices, of features for fixed-effects model matrix (not including
         bias/intercept)
-        :param raneff_features: Count, or column-indices, of features for random-effects model matrix (not including
-        bias/intercept)
+        :param raneff_features: XXX
         :param fixed_effects_nn: An optional torch.nn.Module for the fixed-effects. The default is to create a
         `torch.nn.Linear(num_fixed_features, 1)`.
         :param verbose: Verbosity level; 1 (default) allows certain messages, 0 disables all messages, 2 (TODO)
@@ -106,217 +57,358 @@ class MixedEffectsModule(torch.nn.Module):
         self.fixed_effects_nn = fixed_effects_nn
 
         # random effects:
-        if isinstance(raneff_features, int):
-            self.rf_idx = list(range(raneff_features))
-        else:
-            self.rf_idx = list(raneff_features)
+        if not isinstance(raneff_features, dict):
+            raneff_features = {self._single_gf_name: raneff_features}
+        self.rf_idx = OrderedDict()
+        for grouping_factor, rf in raneff_features.items():
+            if isinstance(rf, int):
+                self.rf_idx[grouping_factor] = list(range(rf))
+            else:
+                self.rf_idx[grouping_factor] = list(rf)
 
         # rfx covariance:
         self._re_cov_params = self._init_re_cov_params()
 
+    @property
+    def grouping_factors(self) -> Sequence:
+        return list(self.rf_idx.keys())
+
     # covariance -------
-    # child-classes could override these 3 methods
-    def re_distribution(self) -> torch.distributions.MultivariateNormal:
+    # child-classes could override the first 3 methods for different parameterizations
+    def re_distribution(self, grouping_factor: str) -> torch.distributions.MultivariateNormal:
         L = log_chol_to_chol(
-            log_diag=self._re_cov_params['cholesky_log_diag'], off_diag=self._re_cov_params['cholesky_off_diag']
+            log_diag=self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'],
+            off_diag=self._re_cov_params[f'{grouping_factor}_cholesky_off_diag']
         )
         return torch.distributions.MultivariateNormal(loc=torch.zeros(len(L)), scale_tril=L)
 
     def _init_re_cov_params(self) -> torch.nn.ParameterDict:
-        _rank = len(self.rf_idx) + 1
         params = torch.nn.ParameterDict()
-        _num_upper_tri = int(_rank * (_rank - 1) / 2)
-        params['cholesky_log_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_rank))
-        params['cholesky_off_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_num_upper_tri))
+        for gf, idx in self.rf_idx.items():
+            _rank = len(idx) + 1
+            _num_upper_tri = int(_rank * (_rank - 1) / 2)
+            params[f'{gf}_cholesky_log_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_rank))
+            params[f'{gf}_cholesky_off_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_num_upper_tri))
         return params
 
-    def set_re_cov(self, cov: torch.Tensor):
-        """
-        :param cov: The covariance matrix of the random-effects.
-        """
+    def set_re_cov(self, grouping_factor: str, cov: torch.Tensor):
         with torch.no_grad():
             L = torch.cholesky(cov)
-            self._re_cov_params['cholesky_log_diag'].data[:] = L.diag().log()
-            self._re_cov_params['cholesky_off_diag'].data[:] = torch.tril(L).view(-1)
-            assert torch.isclose(self.re_distribution().covariance_matrix, cov).all()
+            # TODO: avoid .data?
+            self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'].data[:] = L.diag().log()
+            self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = torch.tril(L).view(-1)
+            assert torch.isclose(self.re_distribution(grouping_factor).covariance_matrix, cov).all()
 
     def _is_cov_param(self, param: torch.Tensor) -> bool:
         return any(param is cov_param for cov_param in self._re_cov_params.values())
 
+    def _get_prior_precisions(self, detach: bool) -> Dict[str, torch.Tensor]:
+        out = {}
+        for gf in self.grouping_factors:
+            out[gf] = self.re_distribution(gf).precision_matrix
+            if detach:
+                out[gf] = out[gf].detach()
+        return out
+
     # forward / re-solve -------
     def forward(self,
-                X: Union[torch.Tensor, np.ndarray],
+                X: torch.Tensor,
                 group_ids: Sequence,
-                group_data: Optional[dict] = None,
-                res_per_group: Optional[Union[dict, torch.Tensor]] = None) -> torch.Tensor:
+                re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
+                res_per_gf: Optional[Union[dict, torch.Tensor]] = None) -> torch.Tensor:
         """
 
-        :param X: A 2D tensor or ndarray of predictors
-        :param group_ids: A sequence which assigns each row in X to a group
-        :param group_data: A dictionary whose keys are group-ids (corresponding to `group_ids`) and whose values are
-        historical Xs and ys that will be used to solve the random effects for each group.
-        :param res_per_group: Instead of passing `group_data` to and having the module solver the random-effect per
-        group, can alternatively pass a dictionary whose keys are group-ids and whose values are 1d tensors with the
-        random-effects per group.
-        :return:
+        :param X: A 2D model-matrix Tensor
+        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
+        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+        :param re_solve_data: A tuple of (X,y,group_ids) that will be used for establishing the random-effects.
+        :param res_per_gf: Instead of passing `re_solve_data` and having the module solve the random-effects per
+        group, can alternatively pass these random-effects. This should be a dictionary whose keys are grouping-factors
+        and whose values are tensors. Each tensor's row corresponds to the groups for that grouping factor, in sorted
+        order. If there is only one grouping factor, can pass a tensor.
+        :return: Tensor of predictions
         """
         X = ndarray_to_tensor(X)
         if torch.isnan(X).any():
             raise ValueError("`nans` in `X`")
 
-        if res_per_group is None:
-            if group_data is None:
-                raise TypeError("Must pass one of `group_data`, `betas_per_group`; got neither.")
-            # _re_solve returns in sorted order;
-            # so need to be sure unique ids in `group_data` are same as those in `group_ids`
-            group_data = {g: group_data[g] for g in np.unique(group_ids)}
-            res_per_group_mat = self._re_solve(**self._re_solve_kwargs(group_data))
-            return self.forward(X=X, group_ids=group_ids, group_data=None, res_per_group=res_per_group_mat)
+        if res_per_gf is None:
+            if re_solve_data is None:
+                raise TypeError("Must pass one of `re_solve_data`, `res_per_gf`; got neither.")
+            with torch.no_grad():
+                X_r, y_r, gids_r = re_solve_data
+                X_r = ndarray_to_tensor(X_r)
+                y_r = ndarray_to_tensor(y_r)
+                if set(gids_r) != set(group_ids):
+                    raise NotImplementedError("TODO")
+                solver = self.solver_cls(
+                    X=X_r, y=y_r,
+                    group_ids=_validate_group_ids(gids_r, len(self.grouping_factors)),
+                    design=self.rf_idx
+                )
+                res_per_gf = solver(
+                    fe_offset=validate_1d_like(self.fixed_effects_nn(X_r[:, self.ff_idx])),
+                    prior_precisions=self._get_prior_precisions(detach=True)
+                )
+                return self.forward(X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf)
 
-        if group_data is not None:
-            raise TypeError("Must pass one of `group_data`, `betas_per_group`; got both.")
+        if re_solve_data is not None:
+            raise TypeError("Must pass one of `re_solve_data`, `betas_per_group`; got both.")
 
-        # organize groups, getting an indexer that maps group[i] to rows in the original data
-        ugroups, group_idx = np.unique(group_ids, return_inverse=True)
+        # validate group_ids
+        group_ids = _validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 
-        # get yhat for raneffects w/broadcasting
-        if isinstance(res_per_group, dict):
-            res_per_group_mat = torch.zeros(len(ugroups), len(self.rf_idx) + 1)
-            for i, group_id in enumerate(ugroups):
-                res_per_group_mat[i] = ndarray_to_tensor(res_per_group[group_id])
-        else:
-            res_per_group_mat = ndarray_to_tensor(res_per_group)
-        betas_broad = res_per_group_mat[group_idx]
-        yhat_r = (self._get_Xr(X) * betas_broad).sum(1)
+        # get yhat for raneffects:
+        if not isinstance(res_per_gf, dict):
+            if len(self.grouping_factors) > 1:
+                raise ValueError("`res_per_gf` should be a dictionary (unless there's only one grouping factor)")
+            res_per_gf = {self._single_gf_name: res_per_gf}
+        yhat_r = _get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf)
 
-        # yhat for fixef:
+        # yhat for fixed-effects:
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
 
         # combine:
         return yhat_f + yhat_r
 
-    def _get_Xr(self, X: torch.Tensor) -> torch.Tensor:
-        return torch.cat([torch.ones((len(X), 1)), X[:, self.rf_idx]], 1)
-
-    def get_res_per_group(self, group_data: dict) -> dict:
-        with torch.no_grad():
-            re_mat = self._re_solve(**self._re_solve_kwargs(group_data))
-            out = {}
-            for i, group_id in enumerate(sorted(group_data)):
-                out[group_id] = re_mat[i]
-        return out
-
-    def _re_solve_kwargs(self, group_data: dict, static_kwargs: Optional[dict] = None) -> dict:
-        """
-        kwargs to re_solve that must be computed each time `forward()` is called
-        """
-        if static_kwargs is None:
-            out = self._static_re_solve_kwargs(group_data)
-        else:
-            out = static_kwargs.copy()
-        Xall = out.pop('Xall')
-        out['offset'] = validate_1d_like(self.fixed_effects_nn(Xall[:, self.ff_idx]))
-        out['offset'] = out['offset'].detach()  # TODO: make optional?
-        out['prior_precision'] = self.re_distribution().precision_matrix
-        return out
-
-    def _static_re_solve_kwargs(self, group_data: dict, **kwargs) -> dict:
-        """
-        kwargs to re_solve that can be precomputed once, then re-used for multiple `forward()` calls
-        """
-        assert not len(kwargs), (
-            f"`{type(self).__name__}` doesn't take additional kwargs; subclass should have removed: `{set(kwargs)}`"
-        )
-        out = {
-            'Xall': [],
-            'X': [],
-            'XtX': [],
-            'y': [],
-            'group_ids': []
-        }
-        for group_id in sorted(group_data.keys()):
-            Xg, yg = group_data[group_id]
-            if isinstance(Xg, np.ndarray):
-                Xg = torch.from_numpy(Xg.astype('float32'))
-            if isinstance(yg, np.ndarray):
-                yg = torch.from_numpy(yg.astype('float32'))
-            Xrg = self._get_Xr(Xg)
-            out['X'].append(Xrg)
-            out['XtX'].append(Xrg.t() @ Xrg)
-            out['Xall'].append(Xg)
-            out['y'].append(yg)
-            out['group_ids'].extend([group_id] * len(Xg))
-        out['Xall'] = torch.cat(out['Xall'], 0)
-        out['XtX'] = torch.stack(out['XtX'])
-        out['X'] = torch.cat(out['X'], 0)
-        out['y'] = torch.cat(out['y'])
-        return out
-
-    @staticmethod
-    def _re_solve(X: torch.Tensor,
-                  y: torch.Tensor,
-                  group_ids: Sequence,
-                  offset: torch.Tensor,
-                  prior_precision: torch.Tensor,
-                  **kwargs):
-        """
-        Given a batch of X,ys for groups, solve the random-effects.
-        :param X: The N*K random-effects model matrix, including a dummy column of 1s for the intercept.
-        :param y: The length-N target vector.
-        :param group_ids: A length-N sequence that assigns each row of X to a group.
-        :param offset: A length-N offset to apply to the predictions before solving.
-        :param prior_precision: A K*K precision ("penalty") matrix
-        :param kwargs: Keyword-arguments used by subclasses
-        :return: A G*K matrix of solved random-effects, with each row corresponding to the (sorted) `group_ids`
-        """
-        raise NotImplementedError
-
     # fitting --------
-    @staticmethod
-    def make_group_data(X: Union[torch.Tensor, np.ndarray],
-                        y: Union[torch.Tensor, np.ndarray],
-                        group_ids: Sequence) -> dict:
-        X = ndarray_to_tensor(X)
-        y = ndarray_to_tensor(y)
-        group_ids = np.asanyarray(group_ids)
-
-        # torch.split requires we put groups into contiguous chunks:
-        sort_idx = np.argsort(group_ids)
-        group_ids = group_ids[sort_idx]
-        X = X[sort_idx]
-        y = y[sort_idx]
-        # much faster approach to chunking than something like `[X[gid==group_ids] for gid in np.unique(group_ids)]`:
-        unique_groups, counts_per_group = np.unique(group_ids, return_counts=True)
-        counts_per_group = counts_per_group.tolist()
-        group_data = {}
-        for group_id, Xg, yg in zip(unique_groups, torch.split(X, counts_per_group), torch.split(y, counts_per_group)):
-            group_data[group_id] = Xg, yg
-        return group_data
-
     def fit_loop(self,
                  X: Union[torch.Tensor, np.ndarray],
                  y: Union[torch.Tensor, np.ndarray],
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
-                 re_solve_kwargs: Optional[dict] = None,
                  **kwargs) -> Iterator[float]:
         X = ndarray_to_tensor(X)
         y = ndarray_to_tensor(y)
+        group_ids = _validate_group_ids(group_ids, len(self.grouping_factors))
 
-        closure = self.evaluator_cls(module=self, X=X, y=y, group_ids=group_ids, optimizer=optimizer, **kwargs)
-        closure.static_re_solve_kwargs.update(re_solve_kwargs or {})
+        # check whether cov is fixed. if so, can avoid passing it on each call to `closure`.
+        # this is useful for subclasses (e.g. Logistic) that do expensive operations on cov
+        fixed_cov = True
+        for grp in optimizer.param_groups:
+            for p in grp['params']:
+                if self._is_cov_param(p):
+                    fixed_cov = False
+                    break
+        if self.verbose:
+            print(f"Fixed-cov:{fixed_cov}")
+
+        # initialize the solver:
+        solver = self.solver_cls(
+            X=X,
+            y=y,
+            group_ids=group_ids,
+            design=self.rf_idx,
+            prior_precisions=self._get_prior_precisions(detach=True) if fixed_cov else None
+        )
+
+        # progress bar
         if not self.verbose:
-            closure.progress = None
+            progress = None
+        elif isinstance(optimizer, torch.optim.LBFGS):
+            progress = tqdm(total=optimizer.param_groups[0]['max_eval'] * 2)
+        else:
+            progress = tqdm()
+
+        # create the closure which returns the loss
+        def closure():
+            optimizer.zero_grad()
+            with torch.no_grad():
+                yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
+            res_per_gf = solver(
+                fe_offset=yhat_f,
+                prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
+                **kwargs
+            )
+            pred = self(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+            loss = self.get_loss(pred, y, res_per_gf=res_per_gf)
+            loss.backward()
+            if progress:
+                progress.update()  # TODO: add loss to description
+            return loss
 
         epoch = 0
         while True:
             try:
-                closure.set_epoch(epoch)
+                if progress:
+                    progress.reset()
+                    progress.set_description(f"Epoch {epoch}")
                 loss = optimizer.step(closure).item()
                 yield loss
                 epoch += 1
             except KeyboardInterrupt:
                 break
 
-    def get_loss(self, pred: torch.Tensor, actual: torch.Tensor, res_per_group: torch.Tensor):
+    def get_loss(self, pred: torch.Tensor, actual: torch.Tensor, res_per_gf: Dict[str, torch.Tensor]):
         raise NotImplementedError
+
+
+class ReSolver:
+    def __init__(self,
+                 X: torch.Tensor,
+                 y: torch.Tensor,
+                 group_ids: np.ndarray,
+                 design: dict,
+                 prior_precisions: Optional[dict] = None):
+        """
+        Initialize this random-effects solver
+
+        :param X: A model-matrix Tensor
+        :param y: A response/target Tensor
+        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
+        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+        :param design: An ordered dictionary whose keys are grouping-factor labels and whose values are column-indices
+        in `X` that are used for the random-effects of that grouping factor.
+        """
+        self.X = ndarray_to_tensor(X)
+        self.y = ndarray_to_tensor(y)
+        self.group_ids = _validate_group_ids(group_ids, num_grouping_factors=len(design))
+        self.design = design
+        self.prior_precisions = prior_precisions
+
+        # establish static kwargs:
+        self.static_kwargs_per_gf = {}
+        for i, (gp, col_idx) in enumerate(self.design.items()):
+            kwargs = {
+                'X': torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1),
+                'y': y,
+                'group_ids': group_ids[:, i]
+            }
+            kwargs['XtX'] = torch.stack([
+                Xg.t() @ Xg for Xg, in chunk_grouped_data(kwargs['X'], group_ids=kwargs['group_ids'])
+            ])
+            self.static_kwargs_per_gf[gp] = kwargs
+
+    def _get_kwargs_per_gf(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None, **kwargs) -> dict:
+        if kwargs:
+            raise TypeError(f"Unexpected keyword-args:\n{set(kwargs.keys())}")
+
+        assert not fe_offset.requires_grad
+
+        if prior_precisions is None:
+            # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
+            prior_precisions = self.prior_precisions
+
+        kwargs_per_gf = {}
+        for gf in self.design.keys():
+            kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
+            kwargs_per_gf[gf]['offset'] = fe_offset.clone()
+            kwargs_per_gf[gf]['prior_precision'] = prior_precisions[gf]
+        return kwargs_per_gf
+
+    def __call__(self,
+                 fe_offset: torch.Tensor,
+                 max_iter: int = 200,
+                 tol: float = .01,
+                 **kwargs) -> Dict[str, torch.Tensor]:
+        """
+        Solve the random effects.
+        :param fe_offset: The offset that comes from the fixed-effects.
+        :param max_iter: The maximum number of iterations.
+        :param tol: Tolerance for checking convergence.
+        :param kwargs: Other keyword arguments used to create kwargs for `step`
+        :return: A dictionary with random-effects for each grouping-factor
+        """
+        assert max_iter > 0
+        kwargs_per_gf = self._get_kwargs_per_gf(fe_offset=fe_offset, **kwargs)
+
+        self.history = []
+        while True:
+            if len(self.history) >= max_iter:
+                # TODO: mask gradient for unconverged groups?
+                if max_iter:
+                    warn("TODO")
+                break
+
+            # take a step towards solving the random-effects:
+            self.history.append({})
+            for gf in self.design.keys():
+                self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf])
+
+            # check convergence:
+            if self._check_convergence(tol=tol):
+                # TODO: verbose
+                # TODO: patience
+                break
+
+            # recompute offset, etc:
+            kwargs_per_gf = self.update_step(kwargs_per_gf, fe_offset=fe_offset, tol=tol)
+
+        return self.history[-1]
+
+    def solve_step(self,
+                   X: torch.Tensor,
+                   y: torch.Tensor,
+                   offset: torch.Tensor,
+                   group_ids: Sequence,
+                   prior_precision: torch.Tensor,
+                   **kwargs) -> torch.Tensor:
+        """
+        Update initial random-effects. For some solvers this might not be iterative given a single grouping factor
+        because a closed-form solution exists (e.g. gaussian); however, this is still an iterative `step` in the case of
+         multiple grouping-factors.
+        """
+        raise NotImplementedError
+
+    def update_step(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> Optional[dict]:
+        """
+        TODO: better name?
+        """
+        # update offsets:
+        with torch.no_grad():
+            yhat_r = _get_yhat_r(
+                design=self.design, X=self.X, group_ids=self.group_ids, res_per_gf=self.history[-1], reduce=False
+            )
+            out = {}
+            for gf1 in kwargs_per_gf.keys():
+                out[gf1] = kwargs_per_gf[gf1].copy()
+                out[gf1]['offset'] = fe_offset.clone()
+                for i, gf2 in enumerate(self.design.keys()):
+                    if gf1 == gf2:
+                        continue
+                    out[gf1]['offset'] += yhat_r[:, i]
+
+        return out
+
+    def _check_convergence(self, tol: float) -> bool:
+        if len(self.history) < 2:
+            return False
+        converged = True
+        with torch.no_grad():
+            for gf in self.design.keys():
+                current_res = self.history[-1][gf]
+                prev_res = self.history[-2][gf]
+                changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
+                if (changes > tol).any():
+                    converged = False
+                    break
+        return converged
+
+
+def _validate_group_ids(group_ids: Sequence, num_grouping_factors: int) -> np.ndarray:
+    group_ids = np.asanyarray(group_ids)
+    if num_grouping_factors > 1:
+        if len(group_ids.shape) != 2 or len(group_ids.shape[1]) != num_grouping_factors:
+            raise ValueError(
+                f"There are {num_grouping_factors} grouping-factors, so `group_ids` should be 2d with 2nd "
+                f"dimension of this extent."
+            )
+    else:
+        group_ids = validate_1d_like(group_ids)[:, None]
+    return group_ids
+
+
+def _get_yhat_r(design: dict,
+                X: torch.Tensor,
+                group_ids: np.ndarray,
+                res_per_gf: dict,
+                reduce: bool = True) -> torch.Tensor:
+    yhat_r = torch.empty(*group_ids.shape)
+    for i, (gf, col_idx) in enumerate(design.items()):
+        Xr = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
+        _, group_idx = np.unique(group_ids[:, i], return_inverse=True)
+        betas_broad = res_per_gf[gf][group_idx]
+        yhat_r[:, i] = (Xr * betas_broad).sum(1)
+    if reduce:
+        yhat_r = yhat_r.sum(1)
+    return yhat_r
