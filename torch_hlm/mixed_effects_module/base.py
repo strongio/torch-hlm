@@ -36,7 +36,7 @@ class MixedEffectsModule(torch.nn.Module):
         """
         :param fixeff_features: Count, or column-indices, of features for fixed-effects model matrix (not including
         bias/intercept)
-        :param raneff_features: XXX
+        :param raneff_features: TODO
         :param fixed_effects_nn: An optional torch.nn.Module for the fixed-effects. The default is to create a
         `torch.nn.Linear(num_fixed_features, 1)`.
         :param verbose: Verbosity level; 1 (default) allows certain messages, 0 disables all messages, 2 (TODO)
@@ -136,20 +136,9 @@ class MixedEffectsModule(torch.nn.Module):
             if re_solve_data is None:
                 raise TypeError("Must pass one of `re_solve_data`, `res_per_gf`; got neither.")
             with torch.no_grad():
-                X_r, y_r, gids_r = re_solve_data
-                X_r = ndarray_to_tensor(X_r)
-                y_r = ndarray_to_tensor(y_r)
-                if set(gids_r) != set(group_ids):
+                if set(re_solve_data[-1]) != set(group_ids):
                     raise NotImplementedError("TODO")
-                solver = self.solver_cls(
-                    X=X_r, y=y_r,
-                    group_ids=_validate_group_ids(gids_r, len(self.grouping_factors)),
-                    design=self.rf_idx
-                )
-                res_per_gf = solver(
-                    fe_offset=validate_1d_like(self.fixed_effects_nn(X_r[:, self.ff_idx])),
-                    prior_precisions=self._get_prior_precisions(detach=True)
-                )
+                res_per_gf = self.get_res(*re_solve_data)
                 return self.forward(X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf)
 
         if re_solve_data is not None:
@@ -171,6 +160,32 @@ class MixedEffectsModule(torch.nn.Module):
         # combine:
         return yhat_f + yhat_r
 
+    def get_res(self,
+                X: torch.Tensor,
+                y: torch.Tensor,
+                group_ids: Sequence) -> Dict[str, torch.Tensor]:
+        """
+        Get the random-effects.
+        :param X: A 2D model-matrix Tensor
+        :param y: A 1D target/response Tensor.
+        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
+        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+        :return: A dictionary with grouping-factors as keys and random-effects tensors as values. These tensors have
+        rows corresponding to the sorted group_ids.
+        """
+        X = ndarray_to_tensor(X)
+        y = ndarray_to_tensor(y)
+
+        solver = self.solver_cls(
+            X=X, y=y,
+            group_ids=_validate_group_ids(group_ids, len(self.grouping_factors)),
+            design=self.rf_idx
+        )
+        return solver(
+            fe_offset=validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx])),
+            prior_precisions=self._get_prior_precisions(detach=True)
+        )
+
     # fitting --------
     def fit_loop(self,
                  X: Union[torch.Tensor, np.ndarray],
@@ -190,8 +205,6 @@ class MixedEffectsModule(torch.nn.Module):
                 if self._is_cov_param(p):
                     fixed_cov = False
                     break
-        if self.verbose:
-            print(f"Fixed-cov:{fixed_cov}")
 
         # initialize the solver:
         solver = self.solver_cls(
@@ -208,7 +221,7 @@ class MixedEffectsModule(torch.nn.Module):
         elif isinstance(optimizer, torch.optim.LBFGS):
             progress = tqdm(total=optimizer.param_groups[0]['max_eval'] * 2)
         else:
-            progress = tqdm()
+            progress = tqdm(total=1)
 
         # create the closure which returns the loss
         def closure():
@@ -224,7 +237,8 @@ class MixedEffectsModule(torch.nn.Module):
             loss = self.get_loss(pred, y, res_per_gf=res_per_gf)
             loss.backward()
             if progress:
-                progress.update()  # TODO: add loss to description
+                progress.update()
+                progress.set_description(f"Epoch {epoch:,}; Loss {loss.item():.4}")
             return loss
 
         epoch = 0
@@ -232,9 +246,9 @@ class MixedEffectsModule(torch.nn.Module):
             try:
                 if progress:
                     progress.reset()
-                    progress.set_description(f"Epoch {epoch}")
-                loss = optimizer.step(closure).item()
-                yield loss
+                    progress.set_description(f"Epoch {epoch:,}; Loss {floss:.4}")
+                floss = optimizer.step(closure).item()
+                yield floss
                 epoch += 1
             except KeyboardInterrupt:
                 break
@@ -362,11 +376,12 @@ class ReSolver:
             out = {}
             for gf1 in kwargs_per_gf.keys():
                 out[gf1] = kwargs_per_gf[gf1].copy()
-                out[gf1]['offset'] = fe_offset.clone()
+                out[gf1]['offset'] = [fe_offset.clone()]
                 for i, gf2 in enumerate(self.design.keys()):
                     if gf1 == gf2:
                         continue
-                    out[gf1]['offset'] += yhat_r[:, i]
+                    out[gf1]['offset'].append(yhat_r[:, i])
+                out[gf1]['offset'] = torch.sum(torch.stack(out[gf1]['offset']))
 
         return out
 

@@ -135,9 +135,9 @@ class LogisticMixedEffectsModule(MixedEffectsModule):
         # TODO: this is h-likelihood, should be one but not only option
         actual = ndarray_to_tensor(actual)
         log_prob_lik = -torch.nn.BCEWithLogitsLoss(reduction='sum')(predicted, actual)
-        log_prob_prior = []
-        for gf in self.grouping_factors:
-            log_prob_prior.append(self.re_distribution(gf).log_prob(res_per_gf[gf]).sum())
+        log_prob_prior = [torch.tensor(0.)]
+        for gf, res in res_per_gf.items():
+            log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
         log_prob_prior = torch.stack(log_prob_prior)
         return (-log_prob_lik - log_prob_prior.sum()) / len(actual)
 

@@ -34,6 +34,8 @@ class GaussianReSolver(ReSolver):
         group_ids_seq = rankdata(group_ids, method='dense') - 1
         group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
 
+        prior_precision = prior_precision.expand(len(XtX), -1, -1).clone()
+        assert not offset.requires_grad
         yoff = y - offset
         Xty_els = X * yoff[:, None]
         Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
@@ -76,8 +78,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         actual = ndarray_to_tensor(actual)
         dist = torch.distributions.Normal(predicted, self.residual_std_dev)
         log_prob_lik = dist.log_prob(actual).sum()
-        log_prob_prior = []
-        for gf in self.grouping_factors:
-            log_prob_prior.append(self.re_distribution(gf).log_prob(res_per_gf[gf]).sum())
+        log_prob_prior = [torch.tensor(0.)]
+        for gf, res in res_per_gf.items():
+            log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
         log_prob_prior = torch.stack(log_prob_prior)
         return (-log_prob_lik - log_prob_prior.sum()) / len(actual)
