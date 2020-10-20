@@ -35,12 +35,14 @@ class GaussianReSolver(ReSolver):
         group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
 
         prior_precision = prior_precision.expand(len(XtX), -1, -1).clone()
-        assert not offset.requires_grad
+
         yoff = y - offset
         Xty_els = X * yoff[:, None]
         Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
 
+        # res = torch.inverse(XtX + prior_precision) @ Xty.unsqueeze(-1)
         res, _ = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)
+
         return res.squeeze(-1)
 
     def _check_convergence(self, tol: float) -> bool:
@@ -74,7 +76,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                  predicted: torch.Tensor,
                  actual: torch.Tensor,
                  res_per_gf: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # TODO: this is h-likelihood, should be one but not only option
+        # TODO: this likelihood is not appropriate for optimizing covariance
         actual = ndarray_to_tensor(actual)
         dist = torch.distributions.Normal(predicted, self.residual_std_dev)
         log_prob_lik = dist.log_prob(actual).sum()

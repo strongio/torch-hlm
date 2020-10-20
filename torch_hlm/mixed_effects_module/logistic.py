@@ -132,7 +132,7 @@ class LogisticMixedEffectsModule(MixedEffectsModule):
                  predicted: torch.Tensor,
                  actual: torch.Tensor,
                  res_per_gf: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # TODO: this is h-likelihood, should be one but not only option
+        # TODO: this likelihood is not appropriate for optimizing covariance
         actual = ndarray_to_tensor(actual)
         log_prob_lik = -torch.nn.BCEWithLogitsLoss(reduction='sum')(predicted, actual)
         log_prob_prior = [torch.tensor(0.)]
@@ -140,4 +140,3 @@ class LogisticMixedEffectsModule(MixedEffectsModule):
             log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
         log_prob_prior = torch.stack(log_prob_prior)
         return (-log_prob_lik - log_prob_prior.sum()) / len(actual)
-

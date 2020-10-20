@@ -1,3 +1,4 @@
+import copy
 from collections import OrderedDict
 from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type
 from warnings import warn
@@ -15,7 +16,6 @@ class MixedEffectsModule(torch.nn.Module):
     Base-class for a torch.nn.Module that can be trained with mixed-effects
     """
     solver_cls: Type['ReSolver'] = None
-    _single_gf_name = 'group'
 
     @classmethod
     def from_name(cls, nm: str, *args, **kwargs):
@@ -58,7 +58,7 @@ class MixedEffectsModule(torch.nn.Module):
 
         # random effects:
         if not isinstance(raneff_features, dict):
-            raneff_features = {self._single_gf_name: raneff_features}
+            raneff_features = {'group': raneff_features}
         self.rf_idx = OrderedDict()
         for grouping_factor, rf in raneff_features.items():
             if isinstance(rf, int):
@@ -75,7 +75,11 @@ class MixedEffectsModule(torch.nn.Module):
 
     # covariance -------
     # child-classes could override the first 3 methods for different parameterizations
-    def re_distribution(self, grouping_factor: str, eps: float = 1e-6) -> torch.distributions.MultivariateNormal:
+    def re_distribution(self, grouping_factor: str = None, eps: float = 1e-6) -> torch.distributions.MultivariateNormal:
+        if grouping_factor is None:
+            if len(self.grouping_factors) > 1:
+                raise ValueError("Must specify `grouping_factor`")
+            grouping_factor = self.grouping_factors[0]
         L = log_chol_to_chol(
             log_diag=self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'],
             off_diag=self._re_cov_params[f'{grouping_factor}_cholesky_off_diag']
@@ -88,7 +92,7 @@ class MixedEffectsModule(torch.nn.Module):
             if 'cholesky' not in str(e):
                 raise e
             dist = None
-        if dist is None or not torch.isclose(dist.covariance_matrix, dist.precision_matrix.inverse()).all():
+        if dist is None or not torch.isclose(dist.covariance_matrix, dist.precision_matrix.inverse(), atol=1e-06).all():
             if eps < .01:
                 warn(f"eps of {eps} insufficient to ensure posdef, increasing 10x")
                 return self.re_distribution(grouping_factor, eps=eps * 10)
@@ -108,8 +112,9 @@ class MixedEffectsModule(torch.nn.Module):
             L = torch.cholesky(cov)
             # TODO: avoid .data?
             self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'].data[:] = L.diag().log()
-            self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = torch.tril(L).view(-1)
-            assert torch.isclose(self.re_distribution(grouping_factor).covariance_matrix, cov).all()
+            self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = \
+                L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
+            assert torch.isclose(self.re_distribution(grouping_factor).covariance_matrix, cov, atol=1e-06).all()
 
     def _is_cov_param(self, param: torch.Tensor) -> bool:
         return any(param is cov_param for cov_param in self._re_cov_params.values())
@@ -163,7 +168,7 @@ class MixedEffectsModule(torch.nn.Module):
         if not isinstance(res_per_gf, dict):
             if len(self.grouping_factors) > 1:
                 raise ValueError("`res_per_gf` should be a dictionary (unless there's only one grouping factor)")
-            res_per_gf = {self._single_gf_name: res_per_gf}
+            res_per_gf = {self.grouping_factors[0]: res_per_gf}
         yhat_r = _get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf)
 
         # yhat for fixed-effects:
@@ -204,6 +209,7 @@ class MixedEffectsModule(torch.nn.Module):
                  y: Union[torch.Tensor, np.ndarray],
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
+                 wait_for_res: int = 0,
                  **kwargs) -> Iterator[float]:
         X = ndarray_to_tensor(X)
         y = ndarray_to_tensor(y)
@@ -217,6 +223,8 @@ class MixedEffectsModule(torch.nn.Module):
                 if self._is_cov_param(p):
                     fixed_cov = False
                     break
+        if not fixed_cov:
+            warn("Optimizing the covariance is not yet fully implemented. Optimization may be unstable.")
 
         # initialize the solver:
         solver = self.solver_cls(
@@ -238,14 +246,29 @@ class MixedEffectsModule(torch.nn.Module):
         # create the closure which returns the loss
         def closure():
             optimizer.zero_grad()
-            with torch.no_grad():
-                yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
-            res_per_gf = solver(
-                fe_offset=yhat_f,
-                prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
-                **kwargs
-            )
-            pred = self(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+
+            # fixed effects:
+            yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
+
+            # random effects:
+            if epoch < wait_for_res:
+                yhat_r = 0
+                res_per_gf = {}
+            else:
+                res_per_gf = solver(
+                    fe_offset=yhat_f,  # .detach(),  # <----- TODO
+                    prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
+                    **kwargs
+                )
+                yhat_r = _get_yhat_r(
+                    design=self.rf_idx,
+                    X=X,
+                    group_ids=group_ids,
+                    res_per_gf=res_per_gf
+                )
+
+            # loss:
+            pred = yhat_f + yhat_r
             loss = self.get_loss(pred, y, res_per_gf=res_per_gf)
             loss.backward()
             if progress:
@@ -253,13 +276,12 @@ class MixedEffectsModule(torch.nn.Module):
                 progress.set_description(f"Epoch {epoch:,}; Loss {loss.item():.4}")
             return loss
 
-        floss = float('nan')
         epoch = 0
         while True:
             try:
                 if progress:
                     progress.reset()
-                    progress.set_description(f"Epoch {epoch:,}; Loss {floss:.4}")
+                    progress.set_description(f"Epoch {epoch:,}")
                 floss = optimizer.step(closure).item()
                 yield floss
                 epoch += 1
@@ -364,7 +386,7 @@ class ReSolver:
         if kwargs:
             raise TypeError(f"Unexpected keyword-args:\n{set(kwargs.keys())}")
 
-        #fe_offset = fe_offset.detach()
+        # fe_offset = fe_offset.detach() # <-----TODO
 
         if prior_precisions is None:
             # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
@@ -378,7 +400,7 @@ class ReSolver:
         return kwargs_per_gf
 
     def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> Optional[dict]:
-        fe_offset = fe_offset.detach()
+        # fe_offset = fe_offset.detach() # <-----TODO
 
         # update offsets:
         with torch.no_grad():

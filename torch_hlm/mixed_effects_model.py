@@ -34,6 +34,8 @@ class MixedEffectsModel(BaseEstimator):
         """
         self.response_colname = response_colname
         self.group_colname = group_colname
+        if isinstance(raneff_cols, dict):
+            raise NotImplementedError("TODO: multiple grouping factors")
         self.raneff_cols = raneff_cols
         self.fixeff_cols = fixeff_cols
         self.response_type = response_type
@@ -68,11 +70,11 @@ class MixedEffectsModel(BaseEstimator):
             raise ValueError(f"`X` is missing column '{self.response_colname}'")
 
         # initialize covariance to a sensible default:
+        assert len(self.module_.grouping_factors) == 1
         std_devs = torch.ones(len(self.re_names_))
         std_devs[1:] *= .2 / np.sqrt(len(self.re_names_))
-        self.module_.set_re_cov(torch.diag_embed(std_devs ** 2))
+        self.module_.set_re_cov(self.module_.grouping_factors[0], cov=torch.diag_embed(std_devs ** 2))
 
-        # TODO: implement two-step approach
         self.partial_fit(X=X, y=y, group_ids=group_ids, max_num_epochs=None, **kwargs)
         return self
 
@@ -80,7 +82,7 @@ class MixedEffectsModel(BaseEstimator):
                     X: np.ndarray,
                     y: np.ndarray,
                     group_ids: Sequence,
-                    optimize_re_cov: bool = True,
+                    optimize_re_cov: bool,
                     callbacks: Collection[Callable] = (),
                     max_num_epochs: Optional[int] = 1,
                     early_stopping: Tuple[float, int] = (.001, 2),
