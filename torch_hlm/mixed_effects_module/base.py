@@ -75,12 +75,24 @@ class MixedEffectsModule(torch.nn.Module):
 
     # covariance -------
     # child-classes could override the first 3 methods for different parameterizations
-    def re_distribution(self, grouping_factor: str) -> torch.distributions.MultivariateNormal:
+    def re_distribution(self, grouping_factor: str, eps: float = 1e-6) -> torch.distributions.MultivariateNormal:
         L = log_chol_to_chol(
             log_diag=self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'],
             off_diag=self._re_cov_params[f'{grouping_factor}_cholesky_off_diag']
         )
-        return torch.distributions.MultivariateNormal(loc=torch.zeros(len(L)), scale_tril=L)
+        try:
+            dist = torch.distributions.MultivariateNormal(
+                loc=torch.zeros(len(L)), covariance_matrix=L @ L.t() + eps * torch.eye(len(L))
+            )
+        except RuntimeError as e:
+            if 'cholesky' not in str(e):
+                raise e
+            dist = None
+        if dist is None or not torch.isclose(dist.covariance_matrix, dist.precision_matrix.inverse()).all():
+            if eps < .01:
+                warn(f"eps of {eps} insufficient to ensure posdef, increasing 10x")
+                return self.re_distribution(grouping_factor, eps=eps * 10)
+        return dist
 
     def _init_re_cov_params(self) -> torch.nn.ParameterDict:
         params = torch.nn.ParameterDict()
