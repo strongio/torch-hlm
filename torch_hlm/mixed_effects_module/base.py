@@ -241,6 +241,7 @@ class MixedEffectsModule(torch.nn.Module):
                 progress.set_description(f"Epoch {epoch:,}; Loss {loss.item():.4}")
             return loss
 
+        floss = float('nan')
         epoch = 0
         while True:
             try:
