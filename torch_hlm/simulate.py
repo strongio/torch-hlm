@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -9,14 +9,15 @@ from torch_hlm.mixed_effects_module.utils import log_chol_to_chol, ndarray_to_te
 def simulate_raneffects(num_groups: int,
                         obs_per_group: int,
                         num_raneffects: int,
-                        std_multi: Optional[np.ndarray] = None) -> pd.DataFrame:
+                        std_multi: Optional[np.ndarray] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     :param num_groups: Number of groups
     :param obs_per_group: Number of observations per group
     :param num_raneffects: A number > 0 of random-effects, with the first being the intercept.
     :param std_multi: Multiplier for the standard-deviation of the random effects. Defaults to greater variance for the
     intercept than the predictors.
-    :return: A dataframe with predictors, group-indicator, and (noiseless) target `y`
+    :return: Two dataframes: the first with predictors, group-indicator, and a (noiseless) `y` response; the second
+    with the true random-effects values for each group.
     """
     # generate model-mat
     assert num_raneffects > 0
@@ -35,6 +36,8 @@ def simulate_raneffects(num_groups: int,
     std_multi = np.diag(std_multi)
     rf_cov = std_multi @ rf_cov @ std_multi
     raneffects = np.random.multivariate_normal(mean=np.zeros(num_raneffects), cov=rf_cov, size=num_groups)
+    df_raneffects = pd.DataFrame(raneffects, columns=[f'x{i}' for i in range(num_raneffects)])
+    df_raneffects['group'] = list(range(num_groups))
 
     # broadcast, generate y (without noise)
     group_idx = []
@@ -48,7 +51,7 @@ def simulate_raneffects(num_groups: int,
     df = pd.DataFrame(X, columns=[f'x{i}' for i in range(1, num_raneffects)])
     df['y'] = y_actual
     df['group'] = group_idx
-    return df
+    return df, df_raneffects
 
 
 def _random_cov_mat(rank: int, eps: float = .001) -> np.ndarray:
