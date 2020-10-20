@@ -29,8 +29,8 @@ class LogisticReSolver(ReSolver):
                 pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
                 kwargs['Htild_inv'] = torch.inverse(-XtX - pp)
 
-    def _get_kwargs_per_gf(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None, **kwargs) -> dict:
-        kwargs_per_gf = super()._get_kwargs_per_gf(fe_offset=fe_offset, prior_precisions=prior_precisions)
+    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None, **kwargs) -> dict:
+        kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
         if prior_precisions is not None:
             # Htild_inv was not precomputed, compute it here
             for gf, kwargs in kwargs_per_gf.items():
@@ -48,8 +48,8 @@ class LogisticReSolver(ReSolver):
         self.prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
         return res_per_gf
 
-    def update_step(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> dict:
-        kwargs_per_gf = super().update_step(kwargs_per_gf=kwargs_per_gf, fe_offset=fe_offset, tol=tol)
+    def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> dict:
+        kwargs_per_gf = super()._update_kwargs(kwargs_per_gf=kwargs_per_gf, fe_offset=fe_offset, tol=tol)
         for gf, kwargs in kwargs_per_gf.items():
             if self.history:
                 kwargs_per_gf['prev_res'] = self.history[-1][gf].detach()

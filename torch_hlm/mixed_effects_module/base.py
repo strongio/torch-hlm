@@ -294,23 +294,6 @@ class ReSolver:
             ])
             self.static_kwargs_per_gf[gp] = kwargs
 
-    def _get_kwargs_per_gf(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None, **kwargs) -> dict:
-        if kwargs:
-            raise TypeError(f"Unexpected keyword-args:\n{set(kwargs.keys())}")
-
-        assert not fe_offset.requires_grad
-
-        if prior_precisions is None:
-            # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
-            prior_precisions = self.prior_precisions
-
-        kwargs_per_gf = {}
-        for gf in self.design.keys():
-            kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
-            kwargs_per_gf[gf]['offset'] = fe_offset.clone()
-            kwargs_per_gf[gf]['prior_precision'] = prior_precisions[gf]
-        return kwargs_per_gf
-
     def __call__(self,
                  fe_offset: torch.Tensor,
                  max_iter: int = 200,
@@ -321,11 +304,11 @@ class ReSolver:
         :param fe_offset: The offset that comes from the fixed-effects.
         :param max_iter: The maximum number of iterations.
         :param tol: Tolerance for checking convergence.
-        :param kwargs: Other keyword arguments used to create kwargs for `step`
+        :param kwargs: Other keyword arguments used to create kwargs for `solve_step`
         :return: A dictionary with random-effects for each grouping-factor
         """
         assert max_iter > 0
-        kwargs_per_gf = self._get_kwargs_per_gf(fe_offset=fe_offset, **kwargs)
+        kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset, **kwargs)
 
         self.history = []
         while True:
@@ -347,7 +330,7 @@ class ReSolver:
                 break
 
             # recompute offset, etc:
-            kwargs_per_gf = self.update_step(kwargs_per_gf, fe_offset=fe_offset, tol=tol)
+            kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset, tol=tol)
 
         return self.history[-1]
 
@@ -359,16 +342,32 @@ class ReSolver:
                    prior_precision: torch.Tensor,
                    **kwargs) -> torch.Tensor:
         """
-        Update initial random-effects. For some solvers this might not be iterative given a single grouping factor
+        Update random-effects. For some solvers this might not be iterative given a single grouping factor
         because a closed-form solution exists (e.g. gaussian); however, this is still an iterative `step` in the case of
          multiple grouping-factors.
         """
         raise NotImplementedError
 
-    def update_step(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> Optional[dict]:
-        """
-        TODO: better name?
-        """
+    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None, **kwargs) -> dict:
+        if kwargs:
+            raise TypeError(f"Unexpected keyword-args:\n{set(kwargs.keys())}")
+
+        #fe_offset = fe_offset.detach()
+
+        if prior_precisions is None:
+            # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
+            prior_precisions = self.prior_precisions
+
+        kwargs_per_gf = {}
+        for gf in self.design.keys():
+            kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
+            kwargs_per_gf[gf]['offset'] = fe_offset.clone()
+            kwargs_per_gf[gf]['prior_precision'] = prior_precisions[gf]
+        return kwargs_per_gf
+
+    def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> Optional[dict]:
+        fe_offset = fe_offset.detach()
+
         # update offsets:
         with torch.no_grad():
             yhat_r = _get_yhat_r(
