@@ -110,7 +110,6 @@ class MixedEffectsModule(torch.nn.Module):
     def set_re_cov(self, grouping_factor: str, cov: torch.Tensor):
         with torch.no_grad():
             L = torch.cholesky(cov)
-            # TODO: avoid .data?
             self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'].data[:] = L.diag().log()
             self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = \
                 L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
@@ -142,7 +141,7 @@ class MixedEffectsModule(torch.nn.Module):
         :param res_per_gf: Instead of passing `re_solve_data` and having the module solve the random-effects per
         group, can alternatively pass these random-effects. This should be a dictionary whose keys are grouping-factors
         and whose values are tensors. Each tensor's row corresponds to the groups for that grouping factor, in sorted
-        order. If there is only one grouping factor, can pass a tensor.
+        order. If there is only one grouping factor, can pass a tensor instead of a dict.
         :return: Tensor of predictions
         """
         X = ndarray_to_tensor(X)
@@ -223,8 +222,6 @@ class MixedEffectsModule(torch.nn.Module):
                 if self._is_cov_param(p):
                     fixed_cov = False
                     break
-        if not fixed_cov:
-            warn("Optimizing the covariance is not yet fully implemented. Optimization may be unstable.")
 
         # initialize the solver:
         solver = self.solver_cls(
@@ -269,7 +266,7 @@ class MixedEffectsModule(torch.nn.Module):
 
             # loss:
             pred = yhat_f + yhat_r
-            loss = self.get_loss(pred, y, res_per_gf=res_per_gf)
+            loss = self.get_loss(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
             loss.backward()
             if progress:
                 progress.update()
@@ -288,7 +285,7 @@ class MixedEffectsModule(torch.nn.Module):
             except KeyboardInterrupt:
                 break
 
-    def get_loss(self, pred: torch.Tensor, actual: torch.Tensor, res_per_gf: Dict[str, torch.Tensor]):
+    def get_loss(self, X: torch.Tensor, y: torch.Tensor, group_ids: np.ndarray, **kwargs) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -335,6 +332,7 @@ class ReSolver:
                  **kwargs) -> Dict[str, torch.Tensor]:
         """
         Solve the random effects.
+
         :param fe_offset: The offset that comes from the fixed-effects.
         :param max_iter: The maximum number of iterations.
         :param tol: Tolerance for checking convergence.

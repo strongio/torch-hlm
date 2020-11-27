@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import Sequence, Union, Optional, Dict
 
 import torch
@@ -6,7 +7,8 @@ import numpy as np
 from scipy.stats import rankdata
 
 from .base import MixedEffectsModule, ReSolver
-from .utils import ndarray_to_tensor
+from .utils import ndarray_to_tensor, chunk_grouped_data, validate_1d_like
+from torch.distributions import MultivariateNormal
 
 
 class GaussianReSolver(ReSolver):
@@ -72,16 +74,36 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
     def residual_std_dev(self) -> torch.Tensor:
         return self._residual_std_dev_log.exp()
 
-    def get_loss(self,
-                 predicted: torch.Tensor,
-                 actual: torch.Tensor,
-                 res_per_gf: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # TODO: this likelihood is not appropriate for optimizing covariance
-        actual = ndarray_to_tensor(actual)
-        dist = torch.distributions.Normal(predicted, self.residual_std_dev)
-        log_prob_lik = dist.log_prob(actual).sum()
-        log_prob_prior = [torch.tensor(0.)]
-        for gf, res in res_per_gf.items():
-            log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
-        log_prob_prior = torch.stack(log_prob_prior)
-        return (-log_prob_lik - log_prob_prior.sum()) / len(actual)
+    def get_loss(self, X: torch.Tensor, y: torch.Tensor, group_ids: np.ndarray, **kwargs) -> torch.Tensor:
+        if len(self.grouping_factors) > 1:
+            raise NotImplementedError("`get_loss` for multiple grouping-factors not currently implemented.")
+        gf = self.grouping_factors[0]
+
+        # yhat for fixed effects:
+        yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
+
+        # model-mat for raneffects:
+        col_idx = self.rf_idx[gf]
+        Z = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
+
+        # for computational efficiency, we'll group by rank so we can batch MultivariateNormal's __init__ and log_prob
+        ys_by_rank = defaultdict(list)
+        locs_by_rank = defaultdict(list)
+        covs_by_rank = defaultdict(list)
+        cov = self.re_distribution(gf).covariance_matrix
+        for Z_g, yhat_f_g, y_g in chunk_grouped_data(Z, yhat_f, y, group_ids=group_ids):
+            cov_g = Z_g @ cov @ Z_g.t()
+            rank_g = len(cov_g)
+            locs_by_rank[rank_g].append(yhat_f_g)
+            covs_by_rank[rank_g].append(self.residual_std_dev * torch.eye(rank_g) + cov_g)
+            ys_by_rank[rank_g].append(y_g)
+
+        # mercifully just the product for the single-group case:
+        log_probs = []
+        for rank_g, y_gs in ys_by_rank.items():
+            mvnorm = MultivariateNormal(
+                loc=torch.stack(locs_by_rank[rank_g]), covariance_matrix=torch.stack(covs_by_rank[rank_g])
+            )
+            log_probs.append(mvnorm.log_prob(torch.stack(y_gs)))
+        avg_obs_per = sum(map(len, log_probs)) / float(len(log_probs))
+        return -torch.cat(log_probs).mean() / avg_obs_per
