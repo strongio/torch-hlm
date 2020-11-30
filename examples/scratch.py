@@ -30,7 +30,7 @@ NUM_RES = 10
 NUM_OBS_PER_GROUP = 10
 OPTIMIZE_COV = True
 
-df_train, df_raneff_true_true = simulate_raneffects(NUM_GROUPS, int(NUM_OBS_PER_GROUP*1.25), NUM_RES + 1)
+df_train, df_raneff_true = simulate_raneffects(NUM_GROUPS, int(NUM_OBS_PER_GROUP*1.25), NUM_RES + 1)
 df_train['y'] += (
     1. + # intercept
     .5 * df_train['x1'] + #fixeff 
