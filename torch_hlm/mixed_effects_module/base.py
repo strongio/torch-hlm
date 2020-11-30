@@ -253,7 +253,7 @@ class MixedEffectsModule(torch.nn.Module):
             if self.likelihood_requires_raneffs:
                 yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
                 loss_kwargs['res_per_gf'] = solver(
-                    fe_offset=yhat_f,
+                    fe_offset=yhat_f.detach(),
                     prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
                     **kwargs
                 )
@@ -377,8 +377,6 @@ class ReSolver:
         if kwargs:
             raise TypeError(f"Unexpected keyword-args:\n{set(kwargs.keys())}")
 
-        # fe_offset = fe_offset.detach() # <-----TODO
-
         if prior_precisions is None:
             # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
             prior_precisions = self.prior_precisions
@@ -391,7 +389,6 @@ class ReSolver:
         return kwargs_per_gf
 
     def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> Optional[dict]:
-        # fe_offset = fe_offset.detach() # <-----TODO
 
         # update offsets:
         with torch.no_grad():
