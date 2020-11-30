@@ -12,7 +12,7 @@ from .utils import ndarray_to_tensor
 
 
 class LogisticReSolver(ReSolver):
-    prev_res_per_gf = None
+    _prev_res_per_gf = None
 
     def __init__(self,
                  X: torch.Tensor,
@@ -45,7 +45,7 @@ class LogisticReSolver(ReSolver):
                  tol: float = .01,
                  **kwargs) -> Dict[str, torch.Tensor]:
         res_per_gf = super()(fe_offset=fe_offset, max_iter=max_iter, tol=tol, **kwargs)
-        self.prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
+        self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
         return res_per_gf
 
     def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> dict:
@@ -53,9 +53,9 @@ class LogisticReSolver(ReSolver):
         for gf, kwargs in kwargs_per_gf.items():
             if self.history:
                 kwargs_per_gf['prev_res'] = self.history[-1][gf].detach()
-            elif self.prev_res_per_gf:
+            elif self._prev_res_per_gf:
                 # TODO: jitter?
-                kwargs_per_gf['prev_res'] = self.prev_res_per_gf[gf]
+                kwargs_per_gf['prev_res'] = self._prev_res_per_gf[gf]
             else:
                 kwargs_per_gf['prev_res'] = None
         return kwargs_per_gf
@@ -127,16 +127,19 @@ class LogisticReSolver(ReSolver):
 
 class LogisticMixedEffectsModule(MixedEffectsModule):
     solver_cls = LogisticReSolver
+    likelihood_requires_raneffs = True
 
     def get_loss(self,
-                 predicted: torch.Tensor,
-                 actual: torch.Tensor,
-                 res_per_gf: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # TODO: this likelihood is not appropriate for optimizing covariance
-        actual = ndarray_to_tensor(actual)
-        log_prob_lik = -torch.nn.BCEWithLogitsLoss(reduction='sum')(predicted, actual)
+                 X: torch.Tensor,
+                 y: torch.Tensor,
+                 group_ids: np.ndarray,
+                 res_per_gf: dict = None) -> torch.Tensor:
+        warn(f"`{type(self).__name__}.get_loss()` is not fully implemented.")
+        y = ndarray_to_tensor(y).to(torch.float32)
+        predicted = self.forward(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+        log_prob_lik = -torch.nn.BCEWithLogitsLoss(reduction='sum')(predicted, y)
         log_prob_prior = [torch.tensor(0.)]
         for gf, res in res_per_gf.items():
             log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
         log_prob_prior = torch.stack(log_prob_prior)
-        return (-log_prob_lik - log_prob_prior.sum()) / len(actual)
+        return (-log_prob_lik - log_prob_prior.sum()) / len(y)
