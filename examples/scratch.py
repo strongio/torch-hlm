@@ -17,18 +17,20 @@ import numpy as np
 import pandas as pd
 import torch
 
-from torch_hlm.mixed_effects_module import GaussianMixedEffectsModule
+from torch_hlm.mixed_effects_model import MixedEffectsModel
 from torch_hlm.simulate import simulate_raneffects
 
 torch.manual_seed(42)
 np.random.seed(42)
+
+# ## Simulate Data
 
 NUM_GROUPS = 5000#0
 NUM_RES = 10
 NUM_OBS_PER_GROUP = 50
 OPTIMIZE_COV = True
 
-df_train, df_raneff = simulate_raneffects(NUM_GROUPS, NUM_OBS_PER_GROUP, NUM_RES + 1)
+df_train, df_raneff_true_true = simulate_raneffects(NUM_GROUPS, NUM_OBS_PER_GROUP, NUM_RES + 1)
 df_train['y'] += (
     1. + # intercept
     .5 * df_train['x1'] + #fixeff 
@@ -45,90 +47,59 @@ df_train = df_train.merge(
     drop(columns=['_max_time'])
 df_train
 
-X = df_train.loc[:,df_train.columns.str.startswith('x')].values.astype('float32')
-y = df_train['y'].values.astype('float32')
-group_ids = df_train['group'].values
+# ## Fit Model
 
 # +
-m = GaussianMixedEffectsModule(fixeff_features=NUM_RES, raneff_features=NUM_RES)
+predictors = df_train.columns[df_train.columns.str.startswith('x')].tolist()
 
-true_cov = torch.from_numpy(df_raneff.drop(columns=['group']).cov().values.astype('float32'))
-if OPTIMIZE_COV:
-    _init_re_cov = .05 * torch.eye(NUM_RES+1)
-    _init_re_cov[0,0] = 1.
-    m.set_re_cov('group', _init_re_cov)
-else:
-    m.set_re_cov('group',true_cov)
-# -
-
+model = MixedEffectsModel(
+    fixeff_cols=predictors, 
+    raneff_design={'group' : predictors}, 
+    response_colname='y'
+)
 import datetime
-
-# + hideOutput=true
 print(datetime.datetime.now())
-looper = m.fit_loop(X=X, 
-                    y=y, 
-                    group_ids=group_ids, 
-                    optimizer=torch.optim.LBFGS(
-                        [x for x in m.parameters() if not m._is_cov_param(x) or OPTIMIZE_COV], 
-                        lr=.5,
-                        history_size=50,
-                        line_search_fn='strong_wolfe'
-                    ),
-                   )
-
-loss_history = []
-patience = 0
-prev_loss = float('inf')
-while True:
-    loss = next(looper)
-    loss_history.append(loss)
-    if abs(prev_loss - loss) < .005:
-        patience += 1
-    else:
-        patience = 0
-    if patience > 1:
-        break
-    prev_loss = loss
+model.fit(X=df_train, optimize_re_cov=OPTIMIZE_COV)
 print(datetime.datetime.now())
 # -
 
-pd.Series(loss_history).plot()
+pd.Series(model.loss_history_[-1]).plot()
 
-dict(m.named_parameters())
+# ## Compare Results to Ground Truth
+
+# ### RE Covariance
 
 with torch.no_grad():
-    print(m.re_distribution('group').covariance_matrix.numpy().round(2))
+    print(model.module_.re_distribution('group').covariance_matrix.numpy().round(2))
+true_cov = torch.from_numpy(df_raneff_true.drop(columns=['group']).cov().values.astype('float32'))
 print(true_cov.numpy().round(2))
 
-df_train['y_pred'] = m(
-    X=X, 
-    group_ids=group_ids,
-    re_solve_data=(X, y, group_ids)
- ).numpy()
-
-with torch.no_grad():
-    df_raneff_est = pd.DataFrame(m.get_res(X,y,group_ids)['group'].numpy()).assign(group=list(range(NUM_GROUPS)))
-df_raneff_est.columns = df_raneff.columns.tolist()
+# ### RE Estimates
 
 # +
-df_pred = pd.concat([df_raneff.assign(type='true'),df_raneff_est.assign(type='estimate')]).\
+with torch.no_grad():
+    df_raneff_est = pd.DataFrame(model.module_.get_res(*model.build_model_mats(df_train))['group'].numpy()).assign(group=list(range(NUM_GROUPS)))
+df_raneff_est.columns = df_raneff_true.columns.tolist()
+
+df_raneff = pd.concat([df_raneff_true.assign(type='true'),df_raneff_est.assign(type='estimate')]).\
     melt(id_vars=['group','type']).\
     pivot_table(values='value', columns='type', index=['group','variable']).\
     reset_index()
 
-df_pred.groupby('variable')[['estimate','true']].corr().reset_index(level=0).loc['estimate','true'].values
+df_raneff.groupby('variable')[['estimate','true']].corr().reset_index(level=0).loc['estimate','true'].values
 # -
 
 from plotnine import *
 
 print(
-    ggplot(df_pred, aes(x='estimate', y='true')) + facet_wrap("~variable") + 
+    ggplot(df_raneff, aes(x='estimate', y='true')) + facet_wrap("~variable") + 
     geom_point(alpha=.10) + stat_smooth(color='blue') +
     geom_abline()
 )
 
-# +
+# ### Predicted vs. Actual
 
+df_train['y_pred'] = model.predict(df_train, group_data=df_train)
 print(
     ggplot(df_train.query("group.isin(group.sample(9))"), 
                           aes(x='x1')) + 
@@ -137,6 +108,5 @@ print(
     stat_smooth(aes(y='y_pred'), color='red') +
     facet_wrap("~group")
 )
-# -
 
 

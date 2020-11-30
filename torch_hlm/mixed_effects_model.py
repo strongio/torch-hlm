@@ -1,5 +1,5 @@
 import datetime
-from typing import Sequence, Optional, Type, Collection, Callable, Tuple
+from typing import Sequence, Optional, Type, Collection, Callable, Tuple, Dict, Union
 from warnings import warn
 
 import torch
@@ -14,39 +14,48 @@ from torch_hlm.mixed_effects_module import MixedEffectsModule, LogisticMixedEffe
 class MixedEffectsModel(BaseEstimator):
     def __init__(self,
                  fixeff_cols: Sequence[str],
-                 raneff_cols: Sequence[str],
-                 group_colname: str,
+                 raneff_design: Dict[str, Sequence[str]],
                  response_colname: str,
                  response_type: str = 'gaussian',
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
                  optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.LBFGS,
                  optimizer_kwargs: Optional[dict] = None):
         """
-        :param fixeff_cols: Sequence of column-names in the DataFrame that will be used as fixed-effects predictors.
-        :param raneff_cols: Sequence of column-names in the DataFrame that will be used as random-effects predictors.
-        :param group_colname: The column-name in the DataFrame with the group indicator.
+        :param fixeff_cols: Sequence of column-names that will be used as fixed-effects predictors.
+        :param raneff_design: A dictionary. If there is a single grouping-factor, the key in this dictionary indicates
+        the column-name of the group-indicator; the value of this dictionary is the sequence of random-effects
+        predictors. If there are multiple grouping-factors, then this dictionary will have multiple entries.
         :param response_colname: The column-name in the DataFrame with the response/target.
         :param response_type: Either 'binary' or 'gaussian'
-        :param fixed_effects_nn: A torch.nn.Module that takes in the fixed-effects predictor-matrix and outputs
-        predictions for the fixed-effects. Defaults to a single-layer Linear layer with bias.
+        :param fixed_effects_nn: Optional torch.nn.Module that takes in the fixed-effects predictor-matrix and outputs
+        predictions for the fixed-effects. Defaults to a single-layer Linear with bias.
         :param optimizer_cls: A torch.optim.Optimizer, defaults to LBFGS.
         :param optimizer_kwargs: Keyword-arguments for the optimizer.
         """
         self.response_colname = response_colname
-        self.group_colname = group_colname
-        if isinstance(raneff_cols, dict):
-            raise NotImplementedError("TODO: multiple grouping factors")
-        self.raneff_cols = raneff_cols
         self.fixeff_cols = fixeff_cols
+        self.raneff_design = raneff_design
         self.response_type = response_type
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs
         self.fixed_effects_nn = fixed_effects_nn
 
         self.module_ = None
-        self.fe_names_ = None
-        self.re_names_ = None
-        self.loss_history_ = {}
+        self.loss_history_ = []
+
+        # preserve the ordering where possible
+        assert len(self.fixeff_cols) == len(set(self.fixeff_cols)), "Duplicate `fixeff_cols`"
+        self.all_model_mat_cols = list(self.fixeff_cols)
+        for gf, gf_cols in self.raneff_design.items():
+            assert len(gf_cols) == len(set(gf_cols)), f"Duplicate cols for '{gf}'"
+            for col in gf_cols:
+                if col in self.all_model_mat_cols:
+                    continue
+                self.all_model_mat_cols.append(col)
+
+    @property
+    def grouping_factors(self) -> Sequence[str]:
+        return list(self.raneff_design.keys())
 
     def fit(self, X: pd.DataFrame, y=None, **kwargs) -> 'MixedEffectsModel':
         """
@@ -70,10 +79,11 @@ class MixedEffectsModel(BaseEstimator):
             raise ValueError(f"`X` is missing column '{self.response_colname}'")
 
         # initialize covariance to a sensible default:
-        assert len(self.module_.grouping_factors) == 1
-        std_devs = torch.ones(len(self.re_names_))
-        std_devs[1:] *= .2 / np.sqrt(len(self.re_names_))
-        self.module_.set_re_cov(self.module_.grouping_factors[0], cov=torch.diag_embed(std_devs ** 2))
+        for gf, idx in self.module_.rf_idx.items():
+            std_devs = torch.ones(len(idx) + 1)
+            if len(idx):
+                std_devs[1:] *= .2 / np.sqrt(len(idx))
+            self.module_.set_re_cov(gf, cov=torch.diag_embed(std_devs ** 2))
 
         self.partial_fit(X=X, y=y, group_ids=group_ids, max_num_epochs=None, **kwargs)
         return self
@@ -82,7 +92,7 @@ class MixedEffectsModel(BaseEstimator):
                     X: np.ndarray,
                     y: np.ndarray,
                     group_ids: Sequence,
-                    optimize_re_cov: bool,
+                    optimize_re_cov: bool = True,
                     callbacks: Collection[Callable] = (),
                     max_num_epochs: Optional[int] = 1,
                     early_stopping: Tuple[float, int] = (.001, 2),
@@ -119,13 +129,18 @@ class MixedEffectsModel(BaseEstimator):
             optimizer=self._initialize_optimizer(optimize_re_cov),
             **kwargs
         )
-        lh = self.loss_history_[datetime.datetime.utcnow()] = []
+        self.loss_history_.append([])  # a separate loss-history for each call to `fit()`
+        lh = self.loss_history_[-1]
         epoch = 0
         while True:
-            loss = next(fit_loop)
-            lh.append(loss)
-            for callback in callbacks:
-                callback(lh)
+            try:
+                loss = next(fit_loop)
+                lh.append(loss)
+                for callback in callbacks:
+                    callback(lh)
+            except KeyboardInterrupt:
+                break
+
             if len(lh) > patience:
                 if pd.Series(lh).diff()[-patience:].abs().max() < tol:
                     print(f"Loss-diff < {tol} for {patience} iters in a row, stopping.")
@@ -138,40 +153,51 @@ class MixedEffectsModel(BaseEstimator):
         return self
 
     def build_model_mats(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        all_cols = sorted(list(self.raneff_cols) + list(self.fixeff_cols))
-        X = np.empty((len(df.index), len(all_cols)))
-        for i, col in enumerate(all_cols):
+        X = np.empty((len(df.index), len(self.all_model_mat_cols)))
+        for i, col in enumerate(self.all_model_mat_cols):
             X[:, i] = df[col].values
-        group_ids = df[self.group_colname].values
+        group_ids = df[self.grouping_factors].values
         y = None  # ok to omit in `predict`
         if self.response_colname in df.columns:
             y = df[self.response_colname].values
         return X, y, group_ids
 
     def _initialize_module(self) -> MixedEffectsModule:
-        self.fe_names_ = ['Intercept']
-        self.re_names_ = ['Intercept']
-        module_kwargs = {'fixeff_features': [], 'raneff_features': [], 'fixed_effects_nn': self.fixed_effects_nn}
-        all_cols = sorted(list(self.raneff_cols) + list(self.fixeff_cols))
-        for i, col in enumerate(all_cols):
-            if col in self.raneff_cols:
-                module_kwargs['raneff_features'].append(i)
-                self.re_names_.append(col)
+        module_kwargs = {
+            'fixeff_features': [],
+            'raneff_features': {gf: [] for gf in self.grouping_factors},
+            'fixed_effects_nn': self.fixed_effects_nn
+        }
+
+        # organize model-mat indices:
+        for i, col in enumerate(self.all_model_mat_cols):
+            for gf, gf_cols in self.raneff_design.items():
+                if col in gf_cols:
+                    module_kwargs['raneff_features'][gf].append(i)
             if col in self.fixeff_cols:
                 module_kwargs['fixeff_features'].append(i)
-                self.fe_names_.append(col)
-        return MixedEffectsModule.from_name(nm=self.response_type, **module_kwargs)
+
+        # initialize module of correct type:
+        if self.response_type.lower() == 'gaussian':
+            from torch_hlm.mixed_effects_module import GaussianMixedEffectsModule
+            return GaussianMixedEffectsModule(**module_kwargs)
+        elif self.response_type.lower() in {'binary', 'logistic'}:
+            from torch_hlm.mixed_effects_module import LogisticMixedEffectsModule
+            return LogisticMixedEffectsModule(**module_kwargs)
+        else:
+            raise ValueError(
+                f"Unrecognized '{self.response_type}'; currently supported are logistic/binary and gaussian."
+            )
 
     def _initialize_optimizer(self, optimize_re_cov: bool) -> torch.optim.Optimizer:
         optimizer_kwargs = {'lr': .001}
         if issubclass(self.optimizer_cls, torch.optim.LBFGS):
-            optimizer_kwargs.update(lr=.05 if optimize_re_cov else .25, max_eval=12)
+            optimizer_kwargs.update(lr=.25, max_eval=12, line_search_fn='strong_wolfe')
         optimizer_kwargs.update(self.optimizer_kwargs or {})
         optimizer_kwargs['params'] = []
-        if not optimize_re_cov:
-            for p in self.module_.parameters():
-                if not self.module_._is_cov_param(p):
-                    optimizer_kwargs['params'].append(p)
+        for p in self.module_.parameters():
+            if optimize_re_cov or not self.module_._is_cov_param(p):
+                optimizer_kwargs['params'].append(p)
         return self.optimizer_cls(**optimizer_kwargs)
 
     def predict(self, X: pd.DataFrame, group_data: pd.DataFrame) -> np.ndarray:
@@ -205,5 +231,5 @@ class MixedEffectsModel(BaseEstimator):
         with torch.no_grad():
             X, _, group_ids = self.build_model_mats(X)
             X_t, y_t, group_ids_t = self.build_model_mats(group_data)
-            pred = self.module_(X, group_ids=group_ids, group_data=self.module_.make_group_data(X_t, y_t, group_ids_t))
+            pred = self.module_(X, group_ids=group_ids, re_solve_data=(X_t, y_t, group_ids_t))
             return pred.numpy()

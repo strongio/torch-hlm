@@ -1,4 +1,3 @@
-import copy
 from collections import OrderedDict
 from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type
 from warnings import warn
@@ -18,29 +17,21 @@ class MixedEffectsModule(torch.nn.Module):
     solver_cls: Type['ReSolver'] = None
     likelihood_requires_raneffs = False
 
-    @classmethod
-    def from_name(cls, nm: str, *args, **kwargs):
-        if nm.lower() == 'gaussian':
-            from torch_hlm.mixed_effects_module import GaussianMixedEffectsModule
-            return GaussianMixedEffectsModule(*args, **kwargs)
-        elif nm.lower() in {'binary', 'logistic'}:
-            from torch_hlm.mixed_effects_module import LogisticMixedEffectsModule
-            return LogisticMixedEffectsModule(*args, **kwargs)
-        else:
-            raise ValueError(f"Unrecognized '{nm}'; currently supported are logistic/binary and gaussian")
-
     def __init__(self,
                  fixeff_features: Union[int, Sequence],
                  raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
                  verbose: int = 1):
         """
-        :param fixeff_features: Count, or column-indices, of features for fixed-effects model matrix (not including
-        bias/intercept)
-        :param raneff_features: TODO
+        :param fixeff_features: Thee column-indices of features for fixed-effects model matrix (not including
+        bias/intercept); if a single integer is passed then these indices are `range(fixeff_features)`
+        :param raneff_features: If there is a single grouping factor, then this argument is like `fixeff_features`: the
+        indices in the mode-matrix corresponding to random-effects. If there are multiple grouping factors, then the
+        keys are grouping factor labels and the values are these indices.
         :param fixed_effects_nn: An optional torch.nn.Module for the fixed-effects. The default is to create a
         `torch.nn.Linear(num_fixed_features, 1)`.
-        :param verbose: Verbosity level; 1 (default) allows certain messages, 0 disables all messages, 2 (TODO)
+        :param verbose: Verbosity level; 1 (default) prints the loss on each optimization epoch; 0 disables everything,
+        and 2 allows messages from the inner random-effects solver.
         """
         super().__init__()
         self.verbose = verbose
@@ -55,6 +46,10 @@ class MixedEffectsModule(torch.nn.Module):
         if fixed_effects_nn is None:
             fixed_effects_nn = torch.nn.Linear(num_fixed_features, 1)
             fixed_effects_nn.weight.data[:] = .01 * torch.randn(num_fixed_features)
+        else:
+            for p in fixed_effects_nn.parameters():
+                if p.dtype != torch.float32:
+                    warn("`fixed_effects_nn` doesn't use torch.float32")
         self.fixed_effects_nn = fixed_effects_nn
 
         # random effects:
@@ -95,7 +90,8 @@ class MixedEffectsModule(torch.nn.Module):
             dist = None
         if dist is None or not torch.isclose(dist.covariance_matrix, dist.precision_matrix.inverse(), atol=1e-06).all():
             if eps < .01:
-                warn(f"eps of {eps} insufficient to ensure posdef, increasing 10x")
+                if eps > 1e-04:
+                    warn(f"eps of {eps} insufficient to ensure posdef, increasing 10x")
                 return self.re_distribution(grouping_factor, eps=eps * 10)
         return dist
 
@@ -145,16 +141,24 @@ class MixedEffectsModule(torch.nn.Module):
         order. If there is only one grouping factor, can pass a tensor instead of a dict.
         :return: Tensor of predictions
         """
-        X = ndarray_to_tensor(X)
+        X = ndarray_to_tensor(X).to(torch.float32)
         if torch.isnan(X).any():
             raise ValueError("`nans` in `X`")
 
         if res_per_gf is None:
             if re_solve_data is None:
                 raise TypeError("Must pass one of `re_solve_data`, `res_per_gf`; got neither.")
+            # `res_per_gf` are matrices with rows corresponding to groups; so it needs to assume a fixed set of groups
+            *_, rs_group_ids = re_solve_data
+            group_ids = _validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+            rs_group_ids = _validate_group_ids(rs_group_ids, num_grouping_factors=len(self.grouping_factors))
+            for i, gf in enumerate(self.grouping_factors):
+                if set(group_ids[:, i]) != set(rs_group_ids[:, i]):
+                    raise RuntimeError(
+                        f"Please remove levels of '{gf}' from `re_solve_data` that are not present in `X`/`group_ids`."
+                    )
+
             with torch.no_grad():
-                if set(re_solve_data[-1]) != set(group_ids):
-                    raise NotImplementedError("TODO")
                 res_per_gf = self.get_res(*re_solve_data)
                 return self.forward(X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf)
 
@@ -190,8 +194,8 @@ class MixedEffectsModule(torch.nn.Module):
         :return: A dictionary with grouping-factors as keys and random-effects tensors as values. These tensors have
         rows corresponding to the sorted group_ids.
         """
-        X = ndarray_to_tensor(X)
-        y = ndarray_to_tensor(y)
+        X = ndarray_to_tensor(X).to(torch.float32)
+        y = ndarray_to_tensor(y).to(torch.float32)
 
         solver = self.solver_cls(
             X=X, y=y,
@@ -210,8 +214,8 @@ class MixedEffectsModule(torch.nn.Module):
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
                  **kwargs) -> Iterator[float]:
-        X = ndarray_to_tensor(X)
-        y = ndarray_to_tensor(y)
+        X = ndarray_to_tensor(X).to(torch.float32)
+        y = ndarray_to_tensor(y).to(torch.float32)
         group_ids = _validate_group_ids(group_ids, len(self.grouping_factors))
 
         # check whether cov is fixed. if so, can avoid passing it on each call to `closure`.
@@ -263,15 +267,12 @@ class MixedEffectsModule(torch.nn.Module):
 
         epoch = 0
         while True:
-            try:
-                if progress:
-                    progress.reset()
-                    progress.set_description(f"Epoch {epoch:,}")
-                floss = optimizer.step(closure).item()
-                yield floss
-                epoch += 1
-            except KeyboardInterrupt:
-                break
+            if progress:
+                progress.reset()
+                progress.set_description(f"Epoch {epoch:,}")
+            floss = optimizer.step(closure).item()
+            yield floss
+            epoch += 1
 
     def get_loss(self, X: torch.Tensor, y: torch.Tensor, group_ids: np.ndarray, **kwargs) -> torch.Tensor:
         raise NotImplementedError
@@ -294,8 +295,8 @@ class ReSolver:
         :param design: An ordered dictionary whose keys are grouping-factor labels and whose values are column-indices
         in `X` that are used for the random-effects of that grouping factor.
         """
-        self.X = ndarray_to_tensor(X)
-        self.y = ndarray_to_tensor(y)
+        self.X = ndarray_to_tensor(X).to(torch.float32)
+        self.y = ndarray_to_tensor(y).to(torch.float32)
         self.group_ids = _validate_group_ids(group_ids, num_grouping_factors=len(design))
         self.design = design
         self.prior_precisions = prior_precisions
