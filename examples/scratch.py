@@ -95,7 +95,8 @@ df_raneff.groupby('variable')[['estimate','true']].corr().reset_index(level=0).l
 from plotnine import *
 
 print(
-    ggplot(df_raneff, aes(x='estimate', y='true')) + facet_wrap("~variable") + 
+    ggplot(df_raneff.sample(n=min(5_000,NUM_GROUPS)), 
+           aes(x='estimate', y='true')) + facet_wrap("~variable") + 
     geom_point(alpha=.10) + stat_smooth(color='blue') +
     geom_abline()
 )
