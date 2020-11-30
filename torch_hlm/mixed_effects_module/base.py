@@ -16,6 +16,7 @@ class MixedEffectsModule(torch.nn.Module):
     Base-class for a torch.nn.Module that can be trained with mixed-effects
     """
     solver_cls: Type['ReSolver'] = None
+    likelihood_requires_raneffs = False
 
     @classmethod
     def from_name(cls, nm: str, *args, **kwargs):
@@ -208,7 +209,6 @@ class MixedEffectsModule(torch.nn.Module):
                  y: Union[torch.Tensor, np.ndarray],
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
-                 wait_for_res: int = 0,
                  **kwargs) -> Iterator[float]:
         X = ndarray_to_tensor(X)
         y = ndarray_to_tensor(y)
@@ -223,15 +223,6 @@ class MixedEffectsModule(torch.nn.Module):
                     fixed_cov = False
                     break
 
-        # initialize the solver:
-        solver = self.solver_cls(
-            X=X,
-            y=y,
-            group_ids=group_ids,
-            design=self.rf_idx,
-            prior_precisions=self._get_prior_precisions(detach=True) if fixed_cov else None
-        )
-
         # progress bar
         if not self.verbose:
             progress = None
@@ -240,33 +231,30 @@ class MixedEffectsModule(torch.nn.Module):
         else:
             progress = tqdm(total=1)
 
+        # initialize the solver:
+        if self.likelihood_requires_raneffs:
+            solver = self.solver_cls(
+                X=X,
+                y=y,
+                group_ids=group_ids,
+                design=self.rf_idx,
+                prior_precisions=self._get_prior_precisions(detach=True) if fixed_cov else None
+            )
+
         # create the closure which returns the loss
         def closure():
             optimizer.zero_grad()
 
-            # fixed effects:
-            yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
-
-            # random effects:
-            if epoch < wait_for_res:
-                yhat_r = 0
-                res_per_gf = {}
-            else:
-                res_per_gf = solver(
-                    fe_offset=yhat_f,  # .detach(),  # <----- TODO
+            loss_kwargs = {'X': X, 'y': y, 'group_ids': group_ids}
+            if self.likelihood_requires_raneffs:
+                yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
+                loss_kwargs['res_per_gf'] = solver(
+                    fe_offset=yhat_f,
                     prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
                     **kwargs
                 )
-                yhat_r = _get_yhat_r(
-                    design=self.rf_idx,
-                    X=X,
-                    group_ids=group_ids,
-                    res_per_gf=res_per_gf
-                )
 
-            # loss:
-            pred = yhat_f + yhat_r
-            loss = self.get_loss(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
+            loss = self.get_loss(**loss_kwargs)
             loss.backward()
             if progress:
                 progress.update()
