@@ -17,7 +17,7 @@ class MixedEffectsModel(BaseEstimator):
                  raneff_design: Dict[str, Sequence[str]],
                  response_colname: str,
                  response_type: str = 'gaussian',
-                 fixed_effects_nn: Optional[torch.nn.Module] = None,
+                 module_kwargs: Optional[dict] = None,
                  optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.LBFGS,
                  optimizer_kwargs: Optional[dict] = None):
         """
@@ -27,18 +27,19 @@ class MixedEffectsModel(BaseEstimator):
         predictors. If there are multiple grouping-factors, then this dictionary will have multiple entries.
         :param response_colname: The column-name in the DataFrame with the response/target.
         :param response_type: Either 'binary' or 'gaussian'
-        :param fixed_effects_nn: Optional torch.nn.Module that takes in the fixed-effects predictor-matrix and outputs
-        predictions for the fixed-effects. Defaults to a single-layer Linear with bias.
-        :param optimizer_cls: A torch.optim.Optimizer, defaults to LBFGS.
+        :param module_kwargs: Keyword-arguments for the `MixedEffectsModule`. One worth highlighting is
+        `fixed_effects_nn` -- an optional torch.nn.Module that takes in the fixed-effects predictor-matrix and outputs
+        predictions for the fixed-effects (defaults to a single-layer Linear with bias).
+        :param optimizer_cls: A `torch.optim.Optimizer`, defaults to LBFGS.
         :param optimizer_kwargs: Keyword-arguments for the optimizer.
         """
         self.response_colname = response_colname
         self.fixeff_cols = fixeff_cols
         self.raneff_design = raneff_design
         self.response_type = response_type
+        self.module_kwargs = module_kwargs
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs
-        self.fixed_effects_nn = fixed_effects_nn
 
         self.module_ = None
         self.loss_history_ = []
@@ -166,8 +167,9 @@ class MixedEffectsModel(BaseEstimator):
         module_kwargs = {
             'fixeff_features': [],
             'raneff_features': {gf: [] for gf in self.grouping_factors},
-            'fixed_effects_nn': self.fixed_effects_nn
         }
+        if self.module_kwargs:
+            module_kwargs.update(self.module_kwargs)
 
         # organize model-mat indices:
         for i, col in enumerate(self.all_model_mat_cols):

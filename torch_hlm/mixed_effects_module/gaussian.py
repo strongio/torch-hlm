@@ -7,7 +7,7 @@ import numpy as np
 from scipy.stats import rankdata
 
 from .base import MixedEffectsModule, ReSolver
-from .utils import ndarray_to_tensor, chunk_grouped_data, validate_1d_like
+from .utils import chunk_grouped_data
 from torch.distributions import MultivariateNormal
 
 
@@ -61,11 +61,13 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                  fixeff_features: Union[int, Sequence],
                  raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
+                 covariance_parameterization: str = 'log_cholesky',
                  verbose: int = 1):
         super().__init__(
             fixeff_features=fixeff_features,
             raneff_features=raneff_features,
             fixed_effects_nn=fixed_effects_nn,
+            covariance_parameterization=covariance_parameterization,
             verbose=verbose
         )
         self._residual_std_dev_log = torch.nn.Parameter(.01 * torch.randn(1))
@@ -87,7 +89,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         col_idx = self.rf_idx[gf]
         Z = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
 
-        # for computational efficiency, we'll group by n so we can batch MultivariateNormal's __init__ and log_prob
+        # for computational efficiency, we'll group by nobs so we can batch MultivariateNormal's __init__ and log_prob
         Xs_by_r = defaultdict(list)
         ys_by_r = defaultdict(list)
         Zs_by_r = defaultdict(list)
@@ -96,17 +98,24 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             ys_by_r[len(Z_g)].append(y_g)
             Xs_by_r[len(Z_g)].append(X_g)
 
-        # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
+        # compute log-prob per batch:
         log_probs = []
         for r, y_r in ys_by_r.items():
             ng = len(y_r)
             X_r = torch.stack(Xs_by_r[r])
             Z_r = torch.stack(Zs_by_r[r])
+
+            # cov:
             cov_r = Z_r @ self.re_distribution(gf).covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
             eps_r = (self.residual_std_dev * torch.eye(r)).expand(ng, -1, -1)
+
+            # counter-intuitively, it's faster (for `backward()`) if we call this one per batch here (vs. calling for
+            # the entire dataset above)
             loc = self.fixed_effects_nn(X_r)
             if len(loc.shape) > 2:
                 loc = loc.squeeze(-1)
+
+            # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
             mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
 

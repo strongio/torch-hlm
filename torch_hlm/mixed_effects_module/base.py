@@ -21,6 +21,7 @@ class MixedEffectsModule(torch.nn.Module):
                  fixeff_features: Union[int, Sequence],
                  raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
+                 covariance_parameterization: str = 'log_cholesky',
                  verbose: int = 1):
         """
         :param fixeff_features: Thee column-indices of features for fixed-effects model matrix (not including
@@ -63,6 +64,7 @@ class MixedEffectsModule(torch.nn.Module):
                 self.rf_idx[grouping_factor] = list(rf)
 
         # rfx covariance:
+        self.covariance_parameterization = covariance_parameterization.lower()
         self._re_cov_params = self._init_re_cov_params()
 
     @property
@@ -71,46 +73,59 @@ class MixedEffectsModule(torch.nn.Module):
 
     # covariance -------
     # child-classes could override the first 3 methods for different parameterizations
+    def _init_re_cov_params(self) -> torch.nn.ParameterDict:
+        assert self.covariance_parameterization in {'log_std_dev', 'log_cholesky'}
+        params = torch.nn.ParameterDict()
+        for gf, idx in self.rf_idx.items():
+            _rank = len(idx) + 1
+            if self.covariance_parameterization == 'log_std_dev':
+                params[f'{gf}_log_std_devs'] = torch.nn.Parameter(data=.01 * torch.randn(_rank))
+            else:
+                _num_upper_tri = int(_rank * (_rank - 1) / 2)
+                params[f'{gf}_cholesky_log_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_rank))
+                params[f'{gf}_cholesky_off_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_num_upper_tri))
+        return params
+
     def re_distribution(self, grouping_factor: str = None, eps: float = 1e-6) -> torch.distributions.MultivariateNormal:
         if grouping_factor is None:
             if len(self.grouping_factors) > 1:
                 raise ValueError("Must specify `grouping_factor`")
             grouping_factor = self.grouping_factors[0]
-        L = log_chol_to_chol(
-            log_diag=self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'],
-            off_diag=self._re_cov_params[f'{grouping_factor}_cholesky_off_diag']
-        )
+
+        assert self.covariance_parameterization in {'log_std_dev', 'log_cholesky'}
+        if self.covariance_parameterization == 'log_std_dev':
+            covariance_matrix = torch.diag_embed(self._re_cov_params[f'{grouping_factor}_log_std_devs'].exp() ** 2)
+        else:
+            L = log_chol_to_chol(
+                log_diag=self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'],
+                off_diag=self._re_cov_params[f'{grouping_factor}_cholesky_off_diag']
+            )
+            covariance_matrix = L @ L.t() + eps * torch.eye(len(L))
         try:
             dist = torch.distributions.MultivariateNormal(
-                loc=torch.zeros(len(L)), covariance_matrix=L @ L.t() + eps * torch.eye(len(L))
+                loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix
             )
         except RuntimeError as e:
             if 'cholesky' not in str(e):
                 raise e
             dist = None
-        if dist is None or not torch.isclose(dist.covariance_matrix, dist.precision_matrix.inverse(), atol=1e-06).all():
+        if dist is None or not torch.isclose(dist.covariance_matrix, dist.precision_matrix.inverse(), atol=1e-04).all():
             if eps < .01:
                 if eps > 1e-04:
                     warn(f"eps of {eps} insufficient to ensure posdef, increasing 10x")
                 return self.re_distribution(grouping_factor, eps=eps * 10)
         return dist
 
-    def _init_re_cov_params(self) -> torch.nn.ParameterDict:
-        params = torch.nn.ParameterDict()
-        for gf, idx in self.rf_idx.items():
-            _rank = len(idx) + 1
-            _num_upper_tri = int(_rank * (_rank - 1) / 2)
-            params[f'{gf}_cholesky_log_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_rank))
-            params[f'{gf}_cholesky_off_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_num_upper_tri))
-        return params
-
     def set_re_cov(self, grouping_factor: str, cov: torch.Tensor):
         with torch.no_grad():
-            L = torch.cholesky(cov)
-            self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'].data[:] = L.diag().log()
-            self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = \
-                L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
-            assert torch.isclose(self.re_distribution(grouping_factor).covariance_matrix, cov, atol=1e-06).all()
+            if self.covariance_parameterization == 'log_std_dev':
+                self._re_cov_params[f'{grouping_factor}_log_std_devs'].data[:] = torch.log(torch.diag(cov) ** .5)
+            else:
+                L = torch.cholesky(cov)
+                self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'].data[:] = L.diag().log()
+                self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = \
+                    L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
+            assert torch.isclose(self.re_distribution(grouping_factor).covariance_matrix, cov, atol=1e-04).all()
 
     def _is_cov_param(self, param: torch.Tensor) -> bool:
         return any(param is cov_param for cov_param in self._re_cov_params.values())
@@ -144,6 +159,8 @@ class MixedEffectsModule(torch.nn.Module):
         X = ndarray_to_tensor(X).to(torch.float32)
         if torch.isnan(X).any():
             raise ValueError("`nans` in `X`")
+        if torch.isinf(X).any():
+            raise ValueError("`infs` in `X`")
 
         if res_per_gf is None:
             if re_solve_data is None:
@@ -355,7 +372,7 @@ class ReSolver:
                 break
 
             # recompute offset, etc:
-            kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset, tol=tol)
+            kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset)
 
         return self.history[-1]
 
@@ -374,6 +391,14 @@ class ReSolver:
         raise NotImplementedError
 
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None, **kwargs) -> dict:
+        """
+        Called at the start of the solver's __call__, this XXX
+
+        :param fe_offset: XXX
+        :param prior_precisions: XXX
+        :param kwargs: XXX
+        :return:
+        """
         if kwargs:
             raise TypeError(f"Unexpected keyword-args:\n{set(kwargs.keys())}")
 
@@ -388,7 +413,14 @@ class ReSolver:
             kwargs_per_gf[gf]['prior_precision'] = prior_precisions[gf]
         return kwargs_per_gf
 
-    def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> Optional[dict]:
+    def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor) -> Optional[dict]:
+        """
+        Called on each iteration of the solver's __call__, this method recomputes the offset
+
+        :param kwargs_per_gf: XXX
+        :param fe_offset: XXX
+        :return:
+        """
 
         # update offsets:
         with torch.no_grad():

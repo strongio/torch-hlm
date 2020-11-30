@@ -48,15 +48,19 @@ class LogisticReSolver(ReSolver):
         self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
         return res_per_gf
 
-    def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor, tol: float) -> dict:
-        kwargs_per_gf = super()._update_kwargs(kwargs_per_gf=kwargs_per_gf, fe_offset=fe_offset, tol=tol)
+    def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor) -> dict:
+        kwargs_per_gf = super()._update_kwargs(kwargs_per_gf=kwargs_per_gf, fe_offset=fe_offset)
         for gf, kwargs in kwargs_per_gf.items():
             if self.history:
+                # this is an iterative solver, each iteration updates the `prev_res`
                 kwargs_per_gf['prev_res'] = self.history[-1][gf].detach()
             elif self._prev_res_per_gf:
-                # TODO: jitter?
+                # when this solver is used inside of LogisticMixedEffectsModule.fit_loop, we create an instance then
+                # call it on each optimizer step. we re-use the solutions from the last step as a warm start for
+                # *within* this iterative solver
                 kwargs_per_gf['prev_res'] = self._prev_res_per_gf[gf]
             else:
+                # the first time this instance has been called, use default inits
                 kwargs_per_gf['prev_res'] = None
         return kwargs_per_gf
 
