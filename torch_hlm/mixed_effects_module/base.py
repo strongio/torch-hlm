@@ -231,7 +231,7 @@ class MixedEffectsModule(torch.nn.Module):
         if not self.verbose:
             progress = None
         elif isinstance(optimizer, torch.optim.LBFGS):
-            progress = tqdm(total=optimizer.param_groups[0]['max_eval'] * 2)
+            progress = tqdm(total=optimizer.param_groups[0]['max_eval'])
         else:
             progress = tqdm(total=1)
 
