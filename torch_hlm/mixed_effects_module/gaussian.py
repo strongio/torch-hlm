@@ -105,5 +105,5 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                 loc=torch.stack(locs_by_rank[rank_g]), covariance_matrix=torch.stack(covs_by_rank[rank_g])
             )
             log_probs.append(mvnorm.log_prob(torch.stack(y_gs)))
-        avg_obs_per = sum(map(len, log_probs)) / float(len(log_probs))
-        return -torch.cat(log_probs).mean() / avg_obs_per
+        # make it so that the log-prob is roughly of the same magnitude regardless of the nobs-per-group:
+        return -torch.cat(log_probs).mean() / np.median(list(ys_by_rank.keys()))
