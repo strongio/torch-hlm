@@ -25,12 +25,12 @@ np.random.seed(42)
 
 # ## Simulate Data
 
-NUM_GROUPS = 5000#0
+NUM_GROUPS = 150_000
 NUM_RES = 10
-NUM_OBS_PER_GROUP = 50
+NUM_OBS_PER_GROUP = 10
 OPTIMIZE_COV = True
 
-df_train, df_raneff_true_true = simulate_raneffects(NUM_GROUPS, NUM_OBS_PER_GROUP, NUM_RES + 1)
+df_train, df_raneff_true_true = simulate_raneffects(NUM_GROUPS, int(NUM_OBS_PER_GROUP*1.25), NUM_RES + 1)
 df_train['y'] += (
     1. + # intercept
     .5 * df_train['x1'] + #fixeff 
@@ -40,7 +40,10 @@ df_train['time'] = df_train.groupby('group').cumcount()
 df_train = df_train.merge(
     df_train.loc[:,['group']].\
         drop_duplicates().\
-        assign(_max_time=lambda df: np.random.randint(low=25, high=50,size=len(df)))
+        assign(
+            _max_time=lambda df: 
+                np.random.randint(low=int(NUM_OBS_PER_GROUP*.75), high=int(NUM_OBS_PER_GROUP*1.25), size=len(df))
+    )
 ).\
     query("time<=_max_time").\
     reset_index(drop=True).\

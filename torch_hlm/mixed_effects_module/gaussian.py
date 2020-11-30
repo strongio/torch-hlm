@@ -74,36 +74,41 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
     def residual_std_dev(self) -> torch.Tensor:
         return self._residual_std_dev_log.exp()
 
-    def get_loss(self, X: torch.Tensor, y: torch.Tensor, group_ids: np.ndarray, **kwargs) -> torch.Tensor:
+    def get_loss(self,
+                 X: torch.Tensor,
+                 y: torch.Tensor,
+                 group_ids: np.ndarray,
+                 res_per_gf: dict = None) -> torch.Tensor:
         if len(self.grouping_factors) > 1:
             raise NotImplementedError("`get_loss` for multiple grouping-factors not currently implemented.")
         gf = self.grouping_factors[0]
-
-        # yhat for fixed effects:
-        yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
 
         # model-mat for raneffects:
         col_idx = self.rf_idx[gf]
         Z = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
 
-        # for computational efficiency, we'll group by rank so we can batch MultivariateNormal's __init__ and log_prob
-        ys_by_rank = defaultdict(list)
-        locs_by_rank = defaultdict(list)
-        covs_by_rank = defaultdict(list)
-        cov = self.re_distribution(gf).covariance_matrix
-        for Z_g, yhat_f_g, y_g in chunk_grouped_data(Z, yhat_f, y, group_ids=group_ids):
-            cov_g = Z_g @ cov @ Z_g.t()
-            rank_g = len(cov_g)
-            locs_by_rank[rank_g].append(yhat_f_g)
-            covs_by_rank[rank_g].append(self.residual_std_dev * torch.eye(rank_g) + cov_g)
-            ys_by_rank[rank_g].append(y_g)
+        # for computational efficiency, we'll group by n so we can batch MultivariateNormal's __init__ and log_prob
+        Xs_by_r = defaultdict(list)
+        ys_by_r = defaultdict(list)
+        Zs_by_r = defaultdict(list)
+        for Z_g, X_g, y_g in chunk_grouped_data(Z, X[:, self.ff_idx], y, group_ids=group_ids):
+            Zs_by_r[len(Z_g)].append(Z_g)
+            ys_by_r[len(Z_g)].append(y_g)
+            Xs_by_r[len(Z_g)].append(X_g)
 
-        # mercifully just the product for the single-group case:
+        # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
         log_probs = []
-        for rank_g, y_gs in ys_by_rank.items():
-            mvnorm = MultivariateNormal(
-                loc=torch.stack(locs_by_rank[rank_g]), covariance_matrix=torch.stack(covs_by_rank[rank_g])
-            )
-            log_probs.append(mvnorm.log_prob(torch.stack(y_gs)))
+        for r, y_r in ys_by_r.items():
+            ng = len(y_r)
+            X_r = torch.stack(Xs_by_r[r])
+            Z_r = torch.stack(Zs_by_r[r])
+            cov_r = Z_r @ self.re_distribution(gf).covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
+            eps_r = (self.residual_std_dev * torch.eye(r)).expand(ng, -1, -1)
+            loc = self.fixed_effects_nn(X_r)
+            if len(loc.shape) > 2:
+                loc = loc.squeeze(-1)
+            mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
+            log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
+
         # make it so that the log-prob is roughly of the same magnitude regardless of the nobs-per-group:
-        return -torch.cat(log_probs).mean() / np.median(list(ys_by_rank.keys()))
+        return -torch.cat(log_probs).mean() / np.median(list(ys_by_r.keys()))

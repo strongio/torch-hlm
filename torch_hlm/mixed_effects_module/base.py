@@ -274,7 +274,11 @@ class MixedEffectsModule(torch.nn.Module):
             yield floss
             epoch += 1
 
-    def get_loss(self, X: torch.Tensor, y: torch.Tensor, group_ids: np.ndarray, **kwargs) -> torch.Tensor:
+    def get_loss(self,
+                 X: torch.Tensor,
+                 y: torch.Tensor,
+                 group_ids: np.ndarray,
+                 res_per_gf: dict = None) -> torch.Tensor:
         raise NotImplementedError
 
 
