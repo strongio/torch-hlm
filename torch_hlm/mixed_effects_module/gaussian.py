@@ -118,7 +118,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
             try:
                 mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
-            except RuntimeError:
+            except RuntimeError as e:
                 raise RuntimeError("Unable to evaluate log-prob; consider lowering learning-rate.") from e
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
 
