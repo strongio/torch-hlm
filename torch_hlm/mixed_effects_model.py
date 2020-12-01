@@ -68,13 +68,14 @@ class MixedEffectsModel(BaseEstimator):
     def grouping_factors(self) -> Sequence[str]:
         return list(self.raneff_design.keys())
 
-    def fit(self, X: pd.DataFrame, y=None, **kwargs) -> 'MixedEffectsModel':
+    def fit(self, X: pd.DataFrame, y=None, reset: str = 'warn', **kwargs) -> 'MixedEffectsModel':
         """
         Initialize and fit the underlying `MixedEffectsModule` until loss converges.
 
         :param X: A dataframe with the predictors for fixed and random effects, the group-id column, and the response
         column.
         :param y: Should always be left `None`
+        :param reset: For multiple calls to fit, should we reset? Defaults to yes with a warning.
         :param kwargs: Further keyword-args to pass to partial_fit
         :return: This instance, now fitted.
         """
@@ -82,15 +83,11 @@ class MixedEffectsModel(BaseEstimator):
             warn(f"Ignoring `y` passed to {type(self).__name__}.fit().")
 
         # initialize module:
-        self.module_ = self._initialize_module()
+        if reset or not self.module_:
+            if reset == 'warn' and self.module_:
+                warn("Resetting module.")
+            self.module_ = self._initialize_module()
 
-        # build-model-mat:
-        X, y, group_ids = self.build_model_mats(X)
-        if y is None:
-            raise ValueError(f"`X` is missing column '{self.response_colname}'")
-
-        # on first call, initialize covariance to a sensible default:
-        if not self.loss_history_:
             for gf, idx in self.module_.rf_idx.items():
                 std_devs = torch.ones(len(idx) + 1)
                 if len(idx):
@@ -99,6 +96,11 @@ class MixedEffectsModel(BaseEstimator):
                     self.module_.set_re_cov(gf, cov=torch.diag_embed(std_devs ** 2))
                 except NotImplementedError:
                     pass
+
+        # build-model-mat:
+        X, y, group_ids = self.build_model_mats(X)
+        if y is None:
+            raise ValueError(f"`X` is missing column '{self.response_colname}'")
 
         self.partial_fit(X=X, y=y, group_ids=group_ids, max_num_epochs=None, **kwargs)
         return self
