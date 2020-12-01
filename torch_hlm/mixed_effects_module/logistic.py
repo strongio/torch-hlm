@@ -137,7 +137,8 @@ class LogisticMixedEffectsModule(MixedEffectsModule):
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
-                 res_per_gf: dict = None) -> torch.Tensor:
+                 res_per_gf: dict = None,
+                 reduce: bool = True) -> torch.Tensor:
         warn(f"`{type(self).__name__}.get_loss()` is not fully implemented.")
         y = ndarray_to_tensor(y).to(torch.float32)
         predicted = self.forward(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
@@ -146,4 +147,7 @@ class LogisticMixedEffectsModule(MixedEffectsModule):
         for gf, res in res_per_gf.items():
             log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
         log_prob_prior = torch.stack(log_prob_prior)
-        return (-log_prob_lik - log_prob_prior.sum()) / len(y)
+        loss = (-log_prob_lik - log_prob_prior.sum())
+        if reduce:
+            loss = loss / len(y)
+        return loss

@@ -301,7 +301,8 @@ class MixedEffectsModule(torch.nn.Module):
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
-                 res_per_gf: dict = None) -> torch.Tensor:
+                 res_per_gf: dict = None,
+                 reduce: bool = True) -> torch.Tensor:
         raise NotImplementedError
 
     @staticmethod

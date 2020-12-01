@@ -80,7 +80,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
-                 res_per_gf: dict = None) -> torch.Tensor:
+                 res_per_gf: dict = None,
+                 reduce: str = 'nobs') -> torch.Tensor:
         if len(self.grouping_factors) > 1:
             raise NotImplementedError("`get_loss` for multiple grouping-factors not currently implemented.")
         gf = self.grouping_factors[0]
@@ -118,9 +119,13 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
             try:
                 mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
+                log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
             except RuntimeError as e:
+                if 'chol' not in str(e):
+                    raise e
                 raise RuntimeError("Unable to evaluate log-prob; consider lowering learning-rate.") from e
-            log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
 
-        # make it so that the log-prob is roughly of the same magnitude regardless of the nobs-per-group:
-        return -torch.cat(log_probs).mean() / np.median(list(ys_by_r.keys()))
+        loss = -torch.cat(log_probs).sum()
+        if reduce:
+            loss = loss / len(X)
+        return loss

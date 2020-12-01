@@ -11,6 +11,17 @@ from torch_hlm.mixed_effects_module import MixedEffectsModule, LogisticMixedEffe
 
 
 class MixedEffectsModel(BaseEstimator):
+    @classmethod
+    def get_module_cls(cls, response_type: str) -> Type[MixedEffectsModule]:
+        if response_type.lower() == 'gaussian':
+            from torch_hlm.mixed_effects_module import GaussianMixedEffectsModule
+            return GaussianMixedEffectsModule
+        elif response_type.lower() in {'binary', 'logistic'}:
+            from torch_hlm.mixed_effects_module import LogisticMixedEffectsModule
+            return LogisticMixedEffectsModule
+        else:
+            raise ValueError(f"Unrecognized '{response_type}'; currently supported are logistic/binary and gaussian.")
+
     def __init__(self,
                  fixeff_cols: Sequence[str],
                  raneff_design: Dict[str, Sequence[str]],
@@ -182,17 +193,9 @@ class MixedEffectsModel(BaseEstimator):
             if col in self.fixeff_cols:
                 module_kwargs['fixeff_features'].append(i)
 
-        # initialize module of correct type:
-        if self.response_type.lower() == 'gaussian':
-            from torch_hlm.mixed_effects_module import GaussianMixedEffectsModule
-            return GaussianMixedEffectsModule(**module_kwargs)
-        elif self.response_type.lower() in {'binary', 'logistic'}:
-            from torch_hlm.mixed_effects_module import LogisticMixedEffectsModule
-            return LogisticMixedEffectsModule(**module_kwargs)
-        else:
-            raise ValueError(
-                f"Unrecognized '{self.response_type}'; currently supported are logistic/binary and gaussian."
-            )
+        # initialize module:
+        module_cls = self.get_module_cls(self.response_type)
+        return module_cls(**module_kwargs)
 
     def _initialize_optimizer(self, optimize_re_cov: bool) -> torch.optim.Optimizer:
         optimizer_kwargs = {'lr': .001}
