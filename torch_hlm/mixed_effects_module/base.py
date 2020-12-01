@@ -32,6 +32,16 @@ class MixedEffectsModule(torch.nn.Module):
         keys are grouping factor labels and the values are these indices.
         :param fixed_effects_nn: An optional torch.nn.Module for the fixed-effects. The default is to create a
         `torch.nn.Linear(num_fixed_features, 1)`.
+        :param covariance_parameterization: The default, "log_cholesky", parameterizes the random-effects covariance
+        using the cholesky factorization (which is itself split into two tensors: the log-transformed diagonal
+        elements and the off-diagonal). The other (experimentally) supported option is "low_rank", which parameterizes
+        the covariance with two tensors: (a) the log-transformed std-devations, and (b) a 'low rank' G*K tensor where
+        G is the number of random-effects and K is int(sqrt(G)). Then the covariance is D + V @ V.t() where D is a
+        diagonal-matrix with the std-deviations**2, and V is the low-rank tensor.
+        :param re_scale_penalty: In some settings, optimization will fail because the variance on some random effects
+        is too high (e.g. if there are a very large number of observations per group, the random-intercept might have
+        high variance) which causes numerical issues. Setting `re_scale_penalty>0` can help in these cases. This
+        corresponds to a half-normal prior on the random-effect std-devs, with precision = re_scale_penalty.
         :param verbose: Verbosity level; 1 (default) prints the loss on each optimization epoch; 0 disables everything,
         and 2 allows messages from the inner random-effects solver.
         """
