@@ -1,5 +1,4 @@
-import datetime
-from typing import Sequence, Optional, Type, Collection, Callable, Tuple, Dict, Union
+from typing import Sequence, Optional, Type, Collection, Callable, Tuple, Dict
 from warnings import warn
 
 import torch
@@ -79,12 +78,16 @@ class MixedEffectsModel(BaseEstimator):
         if y is None:
             raise ValueError(f"`X` is missing column '{self.response_colname}'")
 
-        # initialize covariance to a sensible default:
-        for gf, idx in self.module_.rf_idx.items():
-            std_devs = torch.ones(len(idx) + 1)
-            if len(idx):
-                std_devs[1:] *= .2 / np.sqrt(len(idx))
-            self.module_.set_re_cov(gf, cov=torch.diag_embed(std_devs ** 2))
+        # on first call, initialize covariance to a sensible default:
+        if not self.loss_history_:
+            for gf, idx in self.module_.rf_idx.items():
+                std_devs = torch.ones(len(idx) + 1)
+                if len(idx):
+                    std_devs[1:] *= (.5 / np.sqrt(len(idx)))
+                try:
+                    self.module_.set_re_cov(gf, cov=torch.diag_embed(std_devs ** 2))
+                except NotImplementedError:
+                    pass
 
         self.partial_fit(X=X, y=y, group_ids=group_ids, max_num_epochs=None, **kwargs)
         return self
@@ -194,7 +197,7 @@ class MixedEffectsModel(BaseEstimator):
     def _initialize_optimizer(self, optimize_re_cov: bool) -> torch.optim.Optimizer:
         optimizer_kwargs = {'lr': .001}
         if issubclass(self.optimizer_cls, torch.optim.LBFGS):
-            optimizer_kwargs.update(lr=.25, max_eval=12, line_search_fn='strong_wolfe')
+            optimizer_kwargs.update(lr=.10, max_eval=12)
         optimizer_kwargs.update(self.optimizer_kwargs or {})
         optimizer_kwargs['params'] = []
         for p in self.module_.parameters():
