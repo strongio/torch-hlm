@@ -168,19 +168,15 @@ class MixedEffectsModule(torch.nn.Module):
         order. If there is only one grouping factor, can pass a tensor instead of a dict.
         :return: Tensor of predictions
         """
-        X = ndarray_to_tensor(X).to(torch.float32)
-        if torch.isnan(X).any():
-            raise ValueError("`nans` in `X`")
-        if torch.isinf(X).any():
-            raise ValueError("`infs` in `X`")
+        X, = self._validate_tensors(X)
 
         if res_per_gf is None:
             if re_solve_data is None:
                 raise TypeError("Must pass one of `re_solve_data`, `res_per_gf`; got neither.")
             # `res_per_gf` are matrices with rows corresponding to groups; so it needs to assume a fixed set of groups
             *_, rs_group_ids = re_solve_data
-            group_ids = _validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
-            rs_group_ids = _validate_group_ids(rs_group_ids, num_grouping_factors=len(self.grouping_factors))
+            group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+            rs_group_ids = self._validate_group_ids(rs_group_ids, num_grouping_factors=len(self.grouping_factors))
             for i, gf in enumerate(self.grouping_factors):
                 if set(group_ids[:, i]) != set(rs_group_ids[:, i]):
                     raise RuntimeError(
@@ -195,14 +191,14 @@ class MixedEffectsModule(torch.nn.Module):
             raise TypeError("Must pass one of `re_solve_data`, `betas_per_group`; got both.")
 
         # validate group_ids
-        group_ids = _validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+        group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 
         # get yhat for raneffects:
         if not isinstance(res_per_gf, dict):
             if len(self.grouping_factors) > 1:
                 raise ValueError("`res_per_gf` should be a dictionary (unless there's only one grouping factor)")
             res_per_gf = {self.grouping_factors[0]: res_per_gf}
-        yhat_r = _get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+        yhat_r = self._get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf)
 
         # yhat for fixed-effects:
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
@@ -223,12 +219,11 @@ class MixedEffectsModule(torch.nn.Module):
         :return: A dictionary with grouping-factors as keys and random-effects tensors as values. These tensors have
         rows corresponding to the sorted group_ids.
         """
-        X = ndarray_to_tensor(X).to(torch.float32)
-        y = ndarray_to_tensor(y).to(torch.float32)
+        X, y = self._validate_tensors(X, y)
 
         solver = self.solver_cls(
             X=X, y=y,
-            group_ids=_validate_group_ids(group_ids, len(self.grouping_factors)),
+            group_ids=self._validate_group_ids(group_ids, len(self.grouping_factors)),
             design=self.rf_idx
         )
         return solver(
@@ -243,9 +238,8 @@ class MixedEffectsModule(torch.nn.Module):
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
                  **kwargs) -> Iterator[float]:
-        X = ndarray_to_tensor(X).to(torch.float32)
-        y = ndarray_to_tensor(y).to(torch.float32)
-        group_ids = _validate_group_ids(group_ids, len(self.grouping_factors))
+        X, y = self._validate_tensors(X, y)
+        group_ids = self._validate_group_ids(group_ids, len(self.grouping_factors))
 
         # check whether cov is fixed. if so, can avoid passing it on each call to `closure`.
         # this is useful for subclasses (e.g. Logistic) that do expensive operations on cov
@@ -310,6 +304,45 @@ class MixedEffectsModule(torch.nn.Module):
                  res_per_gf: dict = None) -> torch.Tensor:
         raise NotImplementedError
 
+    @staticmethod
+    def _validate_tensors(*args) -> Iterator:
+        for arg in args:
+            arg = ndarray_to_tensor(arg).to(torch.float32)
+            if torch.isnan(arg).any():
+                raise ValueError("`nans` in tensor")
+            if torch.isinf(arg).any():
+                raise ValueError("`infs` in tensor")
+            yield arg
+
+    @staticmethod
+    def _validate_group_ids(group_ids: Sequence, num_grouping_factors: int) -> np.ndarray:
+        group_ids = np.asanyarray(group_ids)
+        if num_grouping_factors > 1:
+            if len(group_ids.shape) != 2 or len(group_ids.shape[1]) != num_grouping_factors:
+                raise ValueError(
+                    f"There are {num_grouping_factors} grouping-factors, so `group_ids` should be 2d with 2nd "
+                    f"dimension of this extent."
+                )
+        else:
+            group_ids = validate_1d_like(group_ids)[:, None]
+        return group_ids
+
+    @staticmethod
+    def _get_yhat_r(design: dict,
+                    X: torch.Tensor,
+                    group_ids: np.ndarray,
+                    res_per_gf: dict,
+                    reduce: bool = True) -> torch.Tensor:
+        yhat_r = torch.empty(*group_ids.shape)
+        for i, (gf, col_idx) in enumerate(design.items()):
+            Xr = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
+            _, group_idx = np.unique(group_ids[:, i], return_inverse=True)
+            betas_broad = res_per_gf[gf][group_idx]
+            yhat_r[:, i] = (Xr * betas_broad).sum(1)
+        if reduce:
+            yhat_r = yhat_r.sum(1)
+        return yhat_r
+
 
 class ReSolver:
     def __init__(self,
@@ -328,9 +361,8 @@ class ReSolver:
         :param design: An ordered dictionary whose keys are grouping-factor labels and whose values are column-indices
         in `X` that are used for the random-effects of that grouping factor.
         """
-        self.X = ndarray_to_tensor(X).to(torch.float32)
-        self.y = ndarray_to_tensor(y).to(torch.float32)
-        self.group_ids = _validate_group_ids(group_ids, num_grouping_factors=len(design))
+        self.X, self.y = MixedEffectsModule._validate_tensors(X, y)
+        self.group_ids = MixedEffectsModule._validate_group_ids(group_ids, num_grouping_factors=len(design))
         self.design = design
         self.prior_precisions = prior_precisions
 
@@ -436,7 +468,7 @@ class ReSolver:
 
         # update offsets:
         with torch.no_grad():
-            yhat_r = _get_yhat_r(
+            yhat_r = MixedEffectsModule._get_yhat_r(
                 design=self.design, X=self.X, group_ids=self.group_ids, res_per_gf=self.history[-1], reduce=False
             )
             out = {}
@@ -464,32 +496,3 @@ class ReSolver:
                     converged = False
                     break
         return converged
-
-
-def _validate_group_ids(group_ids: Sequence, num_grouping_factors: int) -> np.ndarray:
-    group_ids = np.asanyarray(group_ids)
-    if num_grouping_factors > 1:
-        if len(group_ids.shape) != 2 or len(group_ids.shape[1]) != num_grouping_factors:
-            raise ValueError(
-                f"There are {num_grouping_factors} grouping-factors, so `group_ids` should be 2d with 2nd "
-                f"dimension of this extent."
-            )
-    else:
-        group_ids = validate_1d_like(group_ids)[:, None]
-    return group_ids
-
-
-def _get_yhat_r(design: dict,
-                X: torch.Tensor,
-                group_ids: np.ndarray,
-                res_per_gf: dict,
-                reduce: bool = True) -> torch.Tensor:
-    yhat_r = torch.empty(*group_ids.shape)
-    for i, (gf, col_idx) in enumerate(design.items()):
-        Xr = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
-        _, group_idx = np.unique(group_ids[:, i], return_inverse=True)
-        betas_broad = res_per_gf[gf][group_idx]
-        yhat_r[:, i] = (Xr * betas_broad).sum(1)
-    if reduce:
-        yhat_r = yhat_r.sum(1)
-    return yhat_r
