@@ -23,14 +23,18 @@ def simulate_raneffects(num_groups: int,
     assert num_raneffects > 0
     X = np.random.multivariate_normal(
         mean=np.zeros(num_raneffects - 1),
-        cov=_random_corr_mat(num_raneffects - 1, eps=1.),
+        cov=_random_corr_mat(num_raneffects - 1, eps=np.sqrt(num_raneffects)) / np.sqrt(num_raneffects),
         size=num_groups * obs_per_group
     )
 
     # generate random-effects:
-    rf_cov = _random_cov_mat(num_raneffects, eps=0.1)
+    if num_raneffects < 10:
+        rf_cov = _random_cov_mat(num_raneffects, eps=0.1)
+    else:
+        lr = np.random.randn(num_raneffects, int(np.sqrt(num_raneffects)))
+        rf_cov = lr @ lr.T + .1 * np.eye(num_raneffects)
     if std_multi is None:
-        std_multi = [0.5] + [0.05] * (num_raneffects - 1)
+        std_multi = [0.5] + [0.1] * (num_raneffects - 1)
     if isinstance(std_multi, (int, float)):
         std_multi = [std_multi] * num_raneffects
     std_multi = np.diag(std_multi)

@@ -68,22 +68,28 @@ class MixedEffectsModule(torch.nn.Module):
         self._re_cov_params = self._init_re_cov_params()
 
     @property
+    def residual_var(self) -> Union[torch.Tensor, float]:
+        return 1.0
+
+    @property
     def grouping_factors(self) -> Sequence:
         return list(self.rf_idx.keys())
 
     # covariance -------
     # child-classes could override the first 3 methods for different parameterizations
     def _init_re_cov_params(self) -> torch.nn.ParameterDict:
-        assert self.covariance_parameterization in {'log_std_dev', 'log_cholesky'}
+        assert self.covariance_parameterization in {'low_rank', 'log_cholesky'}
         params = torch.nn.ParameterDict()
         for gf, idx in self.rf_idx.items():
             _rank = len(idx) + 1
-            if self.covariance_parameterization == 'log_std_dev':
-                params[f'{gf}_log_std_devs'] = torch.nn.Parameter(data=.01 * torch.randn(_rank))
+            if self.covariance_parameterization == 'low_rank':
+                _low_rank = int(np.sqrt(_rank))  # TODO
+                params[f'{gf}_lr'] = torch.nn.Parameter(data=.1 * torch.randn(_rank, _low_rank))
+                params[f'{gf}_log_std_devs'] = torch.nn.Parameter(data=.1 * torch.randn(_rank))
             else:
                 _num_upper_tri = int(_rank * (_rank - 1) / 2)
-                params[f'{gf}_cholesky_log_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_rank))
-                params[f'{gf}_cholesky_off_diag'] = torch.nn.Parameter(data=.01 * torch.randn(_num_upper_tri))
+                params[f'{gf}_cholesky_log_diag'] = torch.nn.Parameter(data=.1 * torch.randn(_rank))
+                params[f'{gf}_cholesky_off_diag'] = torch.nn.Parameter(data=.1 * torch.randn(_num_upper_tri))
         return params
 
     def re_distribution(self, grouping_factor: str = None, eps: float = 1e-6) -> torch.distributions.MultivariateNormal:
@@ -92,15 +98,21 @@ class MixedEffectsModule(torch.nn.Module):
                 raise ValueError("Must specify `grouping_factor`")
             grouping_factor = self.grouping_factors[0]
 
-        assert self.covariance_parameterization in {'log_std_dev', 'log_cholesky'}
-        if self.covariance_parameterization == 'log_std_dev':
-            covariance_matrix = torch.diag_embed(self._re_cov_params[f'{grouping_factor}_log_std_devs'].exp() ** 2)
+        assert self.covariance_parameterization in {'low_rank', 'log_cholesky'}
+        if self.covariance_parameterization == 'low_rank':
+            covariance_matrix = (
+                    self._re_cov_params[f'{grouping_factor}_lr'] @ self._re_cov_params[f'{grouping_factor}_lr'].t() +
+                    torch.diag_embed(self._re_cov_params[f'{grouping_factor}_log_std_devs'].exp() ** 2)
+            )
         else:
             L = log_chol_to_chol(
                 log_diag=self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'],
                 off_diag=self._re_cov_params[f'{grouping_factor}_cholesky_off_diag']
             )
-            covariance_matrix = L @ L.t() + eps * torch.eye(len(L))
+            covariance_matrix = L @ L.t()
+
+        covariance_matrix = covariance_matrix * self.residual_var + eps * torch.eye(len(covariance_matrix))
+
         try:
             dist = torch.distributions.MultivariateNormal(
                 loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix
@@ -117,14 +129,14 @@ class MixedEffectsModule(torch.nn.Module):
         return dist
 
     def set_re_cov(self, grouping_factor: str, cov: torch.Tensor):
+        rel_cov = cov / self.residual_var
+        if self.covariance_parameterization == 'low_rank':
+            raise NotImplementedError("Cannot set cov when `covariance_parameterization == 'low_rank'`")
         with torch.no_grad():
-            if self.covariance_parameterization == 'log_std_dev':
-                self._re_cov_params[f'{grouping_factor}_log_std_devs'].data[:] = torch.log(torch.diag(cov) ** .5)
-            else:
-                L = torch.cholesky(cov)
-                self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'].data[:] = L.diag().log()
-                self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = \
-                    L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
+            L = torch.cholesky(rel_cov)
+            self._re_cov_params[f'{grouping_factor}_cholesky_log_diag'].data[:] = L.diag().log()
+            self._re_cov_params[f'{grouping_factor}_cholesky_off_diag'].data[:] = \
+                L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
             assert torch.isclose(self.re_distribution(grouping_factor).covariance_matrix, cov, atol=1e-04).all()
 
     def _is_cov_param(self, param: torch.Tensor) -> bool:

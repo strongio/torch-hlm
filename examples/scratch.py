@@ -60,9 +60,15 @@ model = MixedEffectsModel(
     raneff_design={'group' : predictors}, 
     response_colname='y'
 )
+# -
+
 import datetime
 print(datetime.datetime.now())
-model.fit(X=df_train, optimize_re_cov=OPTIMIZE_COV)
+model.fit(
+    X=df_train, 
+    optimize_re_cov=OPTIMIZE_COV, 
+    callbacks=[lambda x: print("Residual Var", model.module_.residual_var.item())]
+)
 print(datetime.datetime.now())
 # -
 
@@ -73,7 +79,8 @@ pd.Series(model.loss_history_[-1]).plot()
 # ### RE Covariance
 
 with torch.no_grad():
-    print(model.module_.re_distribution('group').covariance_matrix.numpy().round(2))
+    _ = model.module_.re_distribution('group').covariance_matrix 
+    print(_.numpy().round(2))
 true_cov = torch.from_numpy(df_raneff_true.drop(columns=['group']).cov().values.astype('float32'))
 print(true_cov.numpy().round(2))
 

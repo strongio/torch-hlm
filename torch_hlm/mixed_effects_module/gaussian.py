@@ -73,8 +73,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         self._residual_std_dev_log = torch.nn.Parameter(.01 * torch.randn(1))
 
     @property
-    def residual_std_dev(self) -> torch.Tensor:
-        return self._residual_std_dev_log.exp()
+    def residual_var(self) -> torch.Tensor:
+        return self._residual_std_dev_log.exp() ** 2
 
     def get_loss(self,
                  X: torch.Tensor,
@@ -107,7 +107,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
 
             # cov:
             cov_r = Z_r @ self.re_distribution(gf).covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_r = (self.residual_std_dev * torch.eye(r)).expand(ng, -1, -1)
+            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1)
 
             # counter-intuitively, it's faster (for `backward()`) if we call this one per batch here (vs. calling for
             # the entire dataset above)
@@ -116,7 +116,10 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                 loc = loc.squeeze(-1)
 
             # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
-            mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
+            try:
+                mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
+            except RuntimeError:
+                raise RuntimeError("Unable to evaluate log-prob; consider lowering learning-rate.") from e
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
 
         # make it so that the log-prob is roughly of the same magnitude regardless of the nobs-per-group:
