@@ -142,12 +142,18 @@ class LogisticMixedEffectsModule(MixedEffectsModule):
         warn(f"`{type(self).__name__}.get_loss()` is not fully implemented.")
         y = ndarray_to_tensor(y).to(torch.float32)
         predicted = self.forward(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+
+        # h-likelihood:
         log_prob_lik = -torch.nn.BCEWithLogitsLoss(reduction='sum')(predicted, y)
         log_prob_prior = [torch.tensor(0.)]
         for gf, res in res_per_gf.items():
             log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
         log_prob_prior = torch.stack(log_prob_prior)
         loss = (-log_prob_lik - log_prob_prior.sum())
+
+        # penalty:
+        loss = loss + self._get_re_penalty()
+
         if reduce:
             loss = loss / len(y)
         return loss

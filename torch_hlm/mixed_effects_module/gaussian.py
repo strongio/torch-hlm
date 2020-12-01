@@ -123,9 +123,12 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             except RuntimeError as e:
                 if 'chol' not in str(e):
                     raise e
-                raise RuntimeError("Unable to evaluate log-prob; consider lowering learning-rate.") from e
+                raise RuntimeError(
+                    "Unable to evaluate log-prob; consider lowering learning-rate or setting `re_scale_penalty`."
+                ) from e
 
         loss = -torch.cat(log_probs).sum()
+        loss = loss + self._get_re_penalty()
         if reduce:
             loss = loss / len(X)
         return loss

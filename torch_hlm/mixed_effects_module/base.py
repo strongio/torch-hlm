@@ -22,6 +22,7 @@ class MixedEffectsModule(torch.nn.Module):
                  raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
                  covariance_parameterization: str = 'log_cholesky',
+                 re_scale_penalty: Union[float, dict] = 0.,
                  verbose: int = 1):
         """
         :param fixeff_features: Thee column-indices of features for fixed-effects model matrix (not including
@@ -66,6 +67,9 @@ class MixedEffectsModule(torch.nn.Module):
         # rfx covariance:
         self.covariance_parameterization = covariance_parameterization.lower()
         self._re_cov_params = self._init_re_cov_params()
+        if not isinstance(re_scale_penalty, dict):
+            re_scale_penalty = {gf: float(re_scale_penalty) for gf in self.grouping_factors}
+        self.re_scale_penalty = re_scale_penalty
 
     @property
     def residual_var(self) -> Union[torch.Tensor, float]:
@@ -304,6 +308,19 @@ class MixedEffectsModule(torch.nn.Module):
                  res_per_gf: dict = None,
                  reduce: bool = True) -> torch.Tensor:
         raise NotImplementedError
+
+    def _get_re_penalty(self) -> Union[float, torch.Tensor]:
+        penalties = []
+        for gf, precision in self.re_scale_penalty.items():
+            if not precision:
+                continue
+            dist = torch.distributions.HalfNormal(np.sqrt(1 / precision))
+            vars = self.re_distribution(gf).covariance_matrix.diag()
+            std_devs = (vars / self.residual_var).sqrt()
+            penalties.append(dist.log_prob(std_devs))
+        if not penalties:
+            return 0.
+        return -torch.cat(penalties).sum()
 
     @staticmethod
     def _validate_tensors(*args) -> Iterator:
