@@ -426,6 +426,7 @@ class ReSolver:
         :param fe_offset: The offset that comes from the fixed-effects.
         :param max_iter: The maximum number of iterations.
         :param tol: Tolerance for checking convergence.
+        :param prior_precisions: A dictionary with the precision matrices for each grouping factor.
         :param kwargs: Other keyword arguments to `solve_step`
         :return: A dictionary with random-effects for each grouping-factor
         """
