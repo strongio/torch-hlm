@@ -430,7 +430,7 @@ class ReSolver:
         :return: A dictionary with random-effects for each grouping-factor
         """
         assert max_iter > 0
-        kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset)
+        kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
 
         self.history = []
         while True:

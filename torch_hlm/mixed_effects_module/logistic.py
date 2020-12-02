@@ -43,6 +43,7 @@ class LogisticReSolver(ReSolver):
                  fe_offset: torch.Tensor,
                  max_iter: int = 200,
                  tol: float = .01,
+                 prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
         res_per_gf = super()(fe_offset=fe_offset, max_iter=max_iter, tol=tol, **kwargs)
         self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
