@@ -251,7 +251,8 @@ class MixedEffectsModule(torch.nn.Module):
                  y: Union[torch.Tensor, np.ndarray],
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
-                 **kwargs) -> Iterator[float]:
+                 solver_kwargs: dict = None) -> Iterator[float]:
+
         X, y = self._validate_tensors(X, y)
         group_ids = self._validate_group_ids(group_ids, len(self.grouping_factors))
 
@@ -273,6 +274,7 @@ class MixedEffectsModule(torch.nn.Module):
             progress = tqdm(total=1)
 
         # initialize the solver:
+        solver_kwargs = solver_kwargs or {}
         if self.likelihood_requires_raneffs:
             solver = self.solver_cls(
                 X=X,
@@ -281,6 +283,8 @@ class MixedEffectsModule(torch.nn.Module):
                 design=self.rf_idx,
                 prior_precisions=self._get_prior_precisions(detach=True) if fixed_cov else None
             )
+        elif solver_kwargs:
+            warn(f"`solver_kwargs` will be ignored, `{type(self).__name__}.fit()` does not require re-solve.")
 
         # create the closure which returns the loss
         def closure():
@@ -292,7 +296,7 @@ class MixedEffectsModule(torch.nn.Module):
                 loss_kwargs['res_per_gf'] = solver(
                     fe_offset=yhat_f.detach(),
                     prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
-                    **kwargs
+                    **solver_kwargs
                 )
 
             loss = self.get_loss(**loss_kwargs)
@@ -418,11 +422,11 @@ class ReSolver:
         :param fe_offset: The offset that comes from the fixed-effects.
         :param max_iter: The maximum number of iterations.
         :param tol: Tolerance for checking convergence.
-        :param kwargs: Other keyword arguments used to create kwargs for `solve_step`
+        :param kwargs: Other keyword arguments to `solve_step`
         :return: A dictionary with random-effects for each grouping-factor
         """
         assert max_iter > 0
-        kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset, **kwargs)
+        kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset)
 
         self.history = []
         while True:
@@ -435,7 +439,7 @@ class ReSolver:
             # take a step towards solving the random-effects:
             self.history.append({})
             for gf in self.design.keys():
-                self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf])
+                self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf], **kwargs)
 
             # check convergence:
             if self._check_convergence(tol=tol):
@@ -462,17 +466,14 @@ class ReSolver:
         """
         raise NotImplementedError
 
-    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None, **kwargs) -> dict:
+    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
         """
         Called at the start of the solver's __call__, this XXX
 
         :param fe_offset: XXX
         :param prior_precisions: XXX
-        :param kwargs: XXX
         :return:
         """
-        if kwargs:
-            raise TypeError(f"Unexpected keyword-args:\n{set(kwargs.keys())}")
 
         if prior_precisions is None:
             # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
