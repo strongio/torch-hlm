@@ -392,6 +392,9 @@ class ReSolver:
         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
         :param design: An ordered dictionary whose keys are grouping-factor labels and whose values are column-indices
         in `X` that are used for the random-effects of that grouping factor.
+        :param prior_precisions: A dictionary with the precision matrices for each grouping factor. Should only be
+        passed here if this solver is not being used in a context where the precision matrices are optimized. If the
+        precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
         """
         self.X, self.y = MixedEffectsModule._validate_tensors(X, y)
         self.group_ids = MixedEffectsModule._validate_group_ids(group_ids, num_grouping_factors=len(design))
@@ -415,6 +418,7 @@ class ReSolver:
                  fe_offset: torch.Tensor,
                  max_iter: int = 200,
                  tol: float = .01,
+                 prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
         """
         Solve the random effects.
@@ -476,6 +480,7 @@ class ReSolver:
         """
 
         if prior_precisions is None:
+            assert self.prior_precisions is not None
             # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
             prior_precisions = self.prior_precisions
 
