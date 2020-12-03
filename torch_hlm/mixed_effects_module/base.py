@@ -187,19 +187,39 @@ class MixedEffectsModule(torch.nn.Module):
         if res_per_gf is None:
             if re_solve_data is None:
                 raise TypeError("Must pass one of `re_solve_data`, `res_per_gf`; got neither.")
-            # `res_per_gf` are matrices with rows corresponding to groups; so it needs to assume a fixed set of groups
             *_, rs_group_ids = re_solve_data
             group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
             rs_group_ids = self._validate_group_ids(rs_group_ids, num_grouping_factors=len(self.grouping_factors))
-            for i, gf in enumerate(self.grouping_factors):
-                if set(group_ids[:, i]) != set(rs_group_ids[:, i]):
-                    raise RuntimeError(
-                        f"Please remove levels of '{gf}' from `re_solve_data` that are not present in `X`/`group_ids`."
-                    )
 
             with torch.no_grad():
-                res_per_gf = self.get_res(*re_solve_data)
-                return self.forward(X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf)
+                # solve random-effects:
+                if len(rs_group_ids):
+                    res_per_gf = self.get_res(*re_solve_data)
+                else:
+                    # i.e. re_solve_data is empty
+                    res_per_gf = {gf: torch.zeros((0, len(idx) + 1)) for gf, idx in self.rf_idx.items()}
+
+                # there is no requirement that all groups in `group_ids` are present in `group_data`, or vice versa, so
+                # need to map the re_solve output
+                res_per_gf_padded = {}
+                for gf_i, gf in enumerate(self.grouping_factors):
+                    ugroups_target = {gid: i for i, gid in enumerate(np.unique(group_ids[:, gf_i]))}
+                    ugroups_solve = {gid: i for i, gid in enumerate(np.unique(rs_group_ids[:, gf_i]))}
+                    set1 = set(ugroups_solve) - set(ugroups_target)
+                    if set1 and self.verbose:
+                        print(f"there are {len(set1):,} groups in `re_solve_data` but not in `X`")
+                    set2 = set(ugroups_target) - set(ugroups_solve)
+                    if set2 and self.verbose:
+                        print(f"there are {len(set2):,} groups in `X` but not in `re_solve_data`")
+
+                    res_per_gf_padded[gf] = torch.zeros((len(ugroups_target), len(self.rf_idx[gf]) + 1))
+                    for gid_target, idx_target in ugroups_target.items():
+                        idx_solve = ugroups_solve.get(gid_target)
+                        if idx_solve is None:
+                            continue
+                        res_per_gf_padded[gf][idx_target] = res_per_gf[gf][idx_solve]
+
+                return self.forward(X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf_padded)
 
         if re_solve_data is not None:
             raise TypeError("Must pass one of `re_solve_data`, `betas_per_group`; got both.")

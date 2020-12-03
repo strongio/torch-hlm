@@ -241,5 +241,10 @@ class MixedEffectsModel(BaseEstimator):
         with torch.no_grad():
             X, _, group_ids = self.build_model_mats(X)
             X_t, y_t, group_ids_t = self.build_model_mats(group_data)
+            if y_t is None:
+                raise RuntimeError(
+                    f"`group_data` must include the response ('{self.response_colname}'), so that random-effects can "
+                    f"be computed."
+                )
             pred = self.module_(X, group_ids=group_ids, re_solve_data=(X_t, y_t, group_ids_t))
             return pred.numpy()
