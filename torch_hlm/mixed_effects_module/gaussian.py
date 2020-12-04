@@ -84,6 +84,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                  group_ids: np.ndarray,
                  res_per_gf: dict = None,
                  reduce: str = 'nobs') -> torch.Tensor:
+        X, y = self._validate_tensors(X, y)
+        group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
         if len(self.grouping_factors) > 1:
             raise NotImplementedError("`get_loss` for multiple grouping-factors not currently implemented.")
         gf = self.grouping_factors[0]
@@ -127,10 +129,10 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                     raise e
                 raise RuntimeError(
                     "Unable to evaluate log-prob. Things to try:"
-                    "- Center/scale predictors"
-                    "- Check for extreme-values in the response-variable"
-                    "- Decrease the learning-rate"
-                    "- Set `re_scale_penalty`"
+                    "\n- Center/scale predictors"
+                    "\n- Check for extreme-values in the response-variable"
+                    "\n- Decrease the learning-rate"
+                    "\n- Set `re_scale_penalty`"
                 ) from e
 
         loss = -torch.cat(log_probs).sum()
