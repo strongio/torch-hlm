@@ -31,38 +31,42 @@ class LogisticReSolver(ReSolver):
 
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
         kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
-        if prior_precisions is not None:
-            # Htild_inv was not precomputed, compute it here
-            for gf, kwargs in kwargs_per_gf.items():
+        for gf, kwargs in kwargs_per_gf.items():
+
+            if self._prev_res_per_gf is None:
+                kwargs['prev_res'] = None
+                kwargs['slow_start'] = 10
+            else:
+                # when this solver is used inside of LogisticMixedEffectsModule.fit_loop, we create an instance then
+                # call it on each optimizer step. we re-use the solutions from the last step as a warm start for
+                # *within* this iterative solver
+                kwargs['prev_res'] = self._prev_res_per_gf[gf]
+                kwargs['slow_start'] = 3
+
+            if prior_precisions is not None:
+                # Htild_inv was not precomputed, compute it here
                 XtX = kwargs.pop('XtX')
                 pp = prior_precisions[gf].expand(len(XtX), -1, -1)
                 kwargs['Htild_inv'] = torch.inverse(-XtX - pp)
+
         return kwargs_per_gf
 
     def __call__(self,
                  fe_offset: torch.Tensor,
                  max_iter: int = 200,
                  tol: float = .01,
-                 prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
-        res_per_gf = super()(fe_offset=fe_offset, max_iter=max_iter, tol=tol, **kwargs)
+        res_per_gf = super().__call__(fe_offset=fe_offset, max_iter=max_iter, tol=tol, **kwargs)
         self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
         return res_per_gf
 
     def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor) -> dict:
         kwargs_per_gf = super()._update_kwargs(kwargs_per_gf=kwargs_per_gf, fe_offset=fe_offset)
         for gf, kwargs in kwargs_per_gf.items():
-            if self.history:
-                # this is an iterative solver, each iteration updates the `prev_res`
-                kwargs_per_gf['prev_res'] = self.history[-1][gf].detach()
-            elif self._prev_res_per_gf:
-                # when this solver is used inside of LogisticMixedEffectsModule.fit_loop, we create an instance then
-                # call it on each optimizer step. we re-use the solutions from the last step as a warm start for
-                # *within* this iterative solver
-                kwargs_per_gf['prev_res'] = self._prev_res_per_gf[gf]
-            else:
-                # the first time this instance has been called, use default inits
-                kwargs_per_gf['prev_res'] = None
+            assert self.history
+            # this is an iterative solver, each iteration updates the `prev_res`
+            kwargs['prev_res'] = self.history[-1][gf].detach()
+            kwargs['slow_start'] = 2
         return kwargs_per_gf
 
     # noinspection PyMethodOverriding
@@ -71,9 +75,10 @@ class LogisticReSolver(ReSolver):
                    y: torch.Tensor,
                    offset: torch.Tensor,
                    group_ids: Sequence,
-                   prev_res: torch.Tensor,
                    prior_precision: torch.Tensor,
                    Htild_inv: torch.Tensor,
+                   prev_res: Optional[torch.Tensor],
+                   slow_start: int = 2,
                    cg: Union[bool, str] = 'detach') -> torch.Tensor:
         """
         :param X: N*K model-mat
@@ -126,35 +131,34 @@ class LogisticReSolver(ReSolver):
         else:
             step_size = 1.
 
-        # TODO: slow-start
+        iter_ = len(self.history)
+        step_size = step_size * (iter_ / (float(slow_start) + iter_))
+
         return prev_res + step_direction * step_size
 
 
 class LogisticMixedEffectsModule(MixedEffectsModule):
     solver_cls = LogisticReSolver
-    likelihood_requires_raneffs = True
+    default_loss_type = 'one_step_ahead'  # TODO: with warning?
 
-    def get_loss(self,
-                 X: torch.Tensor,
-                 y: torch.Tensor,
-                 group_ids: np.ndarray,
-                 res_per_gf: dict = None,
-                 reduce: bool = True) -> torch.Tensor:
-        warn(f"`{type(self).__name__}.get_loss()` is not fully implemented.")
+    def loss_requires_raneffs(self, likelihood_type: str) -> bool:
+        if likelihood_type in ('one_step_ahead', 'h_likelihood'):
+            return True
+        else:
+            raise NotImplementedError
+
+    def _get_h_log_prob(self,
+                        X: torch.Tensor,
+                        y: torch.Tensor,
+                        group_ids: np.ndarray,
+                        res_per_gf: dict) -> torch.Tensor:
         y = ndarray_to_tensor(y).to(torch.float32)
-        predicted = self.forward(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
 
-        # h-likelihood:
+        predicted = self(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+
         log_prob_lik = -torch.nn.BCEWithLogitsLoss(reduction='sum')(predicted, y)
         log_prob_prior = [torch.tensor(0.)]
         for gf, res in res_per_gf.items():
             log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
         log_prob_prior = torch.stack(log_prob_prior)
-        loss = (-log_prob_lik - log_prob_prior.sum())
-
-        # penalty:
-        loss = loss + self._get_re_penalty()
-
-        if reduce:
-            loss = loss / len(y)
-        return loss
+        return log_prob_lik + log_prob_prior.sum()

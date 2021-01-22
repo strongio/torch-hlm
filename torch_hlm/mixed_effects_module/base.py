@@ -15,7 +15,6 @@ class MixedEffectsModule(torch.nn.Module):
     Base-class for a torch.nn.Module that can be trained with mixed-effects
     """
     solver_cls: Type['ReSolver'] = None
-    likelihood_requires_raneffs = False
 
     def __init__(self,
                  fixeff_features: Union[int, Sequence],
@@ -25,7 +24,7 @@ class MixedEffectsModule(torch.nn.Module):
                  re_scale_penalty: Union[float, dict] = 0.,
                  verbose: int = 1):
         """
-        :param fixeff_features: Thee column-indices of features for fixed-effects model matrix (not including
+        :param fixeff_features: The column-indices of features for fixed-effects model matrix (not including
         bias/intercept); if a single integer is passed then these indices are `range(fixeff_features)`
         :param raneff_features: If there is a single grouping factor, then this argument is like `fixeff_features`: the
         indices in the mode-matrix corresponding to random-effects. If there are multiple grouping factors, then the
@@ -80,6 +79,9 @@ class MixedEffectsModule(torch.nn.Module):
         if not isinstance(re_scale_penalty, dict):
             re_scale_penalty = {gf: float(re_scale_penalty) for gf in self.grouping_factors}
         self.re_scale_penalty = re_scale_penalty
+
+    def loss_requires_raneffs(self, likelihood_type: str) -> bool:
+        raise NotImplementedError
 
     @property
     def residual_var(self) -> Union[torch.Tensor, float]:
@@ -271,6 +273,7 @@ class MixedEffectsModule(torch.nn.Module):
                  y: Union[torch.Tensor, np.ndarray],
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
+                 loss_type: Optional[str] = None,
                  solver_kwargs: dict = None) -> Iterator[float]:
 
         X, y = self._validate_tensors(X, y)
@@ -295,7 +298,7 @@ class MixedEffectsModule(torch.nn.Module):
 
         # initialize the solver:
         solver_kwargs = solver_kwargs or {}
-        if self.likelihood_requires_raneffs:
+        if self.loss_requires_raneffs(loss_type):
             solver = self.solver_cls(
                 X=X,
                 y=y,
@@ -310,14 +313,16 @@ class MixedEffectsModule(torch.nn.Module):
         def closure():
             optimizer.zero_grad()
 
-            loss_kwargs = {'X': X, 'y': y, 'group_ids': group_ids}
-            if self.likelihood_requires_raneffs:
+            loss_kwargs = {'X': X, 'y': y, 'group_ids': group_ids, 'type': loss_type}
+            if self.loss_requires_raneffs(loss_type):
                 yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
                 loss_kwargs['res_per_gf'] = solver(
                     fe_offset=yhat_f.detach(),
                     prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
                     **solver_kwargs
                 )
+            else:
+                loss_kwargs['res_per_gf'] = None
 
             loss = self.get_loss(**loss_kwargs)
             loss.backward()
@@ -339,8 +344,44 @@ class MixedEffectsModule(torch.nn.Module):
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
-                 res_per_gf: dict = None,
+                 res_per_gf: dict,
+                 type: Optional[str] = None,
                  reduce: bool = True) -> torch.Tensor:
+        if type is None:
+            type = self.default_loss_type
+
+        if type == 'one_step_ahead':
+            loss = -self._get_one_step_ahead_log_prob(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
+        elif type == 'full_likelihood':  # TODO better name
+            loss = -self._get_log_prob(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
+        elif type == 'h_likelihood':
+            loss = -self._get_h_log_prob(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
+        else:
+            raise ValueError(f"Unknown type {type}")
+        loss = loss + self._get_re_penalty()
+        if reduce:
+            loss = loss / len(X)
+        return loss
+
+    def _get_one_step_ahead_log_prob(self,
+                                     X: torch.Tensor,
+                                     y: torch.Tensor,
+                                     group_ids: np.ndarray,
+                                     res_per_gf: dict) -> torch.Tensor:
+        raise NotImplementedError("TODO")
+
+    def _get_log_prob(self,
+                      X: torch.Tensor,
+                      y: torch.Tensor,
+                      group_ids: np.ndarray,
+                      res_per_gf: dict) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _get_h_log_prob(self,
+                        X: torch.Tensor,
+                        y: torch.Tensor,
+                        group_ids: np.ndarray,
+                        res_per_gf: dict) -> torch.Tensor:
         raise NotImplementedError
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:

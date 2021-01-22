@@ -128,3 +128,5 @@ dmypy.json
 .idea/*
 *.ipynb
 *.pt
+*.DS_Store
+*.csv

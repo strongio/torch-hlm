@@ -12,6 +12,7 @@ from torch.distributions import MultivariateNormal
 
 
 class GaussianReSolver(ReSolver):
+
     # noinspection PyMethodOverriding
     def solve_step(self,
                    X: torch.Tensor,
@@ -56,6 +57,7 @@ class GaussianReSolver(ReSolver):
 
 class GaussianMixedEffectsModule(MixedEffectsModule):
     solver_cls = GaussianReSolver
+    default_loss_type = 'full_likelihood'
 
     def __init__(self,
                  fixeff_features: Union[int, Sequence],
@@ -78,12 +80,19 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
     def residual_var(self) -> torch.Tensor:
         return self._residual_std_dev_log.exp() ** 2
 
-    def get_loss(self,
-                 X: torch.Tensor,
-                 y: torch.Tensor,
-                 group_ids: np.ndarray,
-                 res_per_gf: dict = None,
-                 reduce: str = 'nobs') -> torch.Tensor:
+    def loss_requires_raneffs(self, likelihood_type: str) -> bool:
+        if likelihood_type == 'full_likelihood':
+            return False
+        elif likelihood_type == 'one_step_ahead':
+            return True
+        else:
+            raise NotImplementedError
+
+    def _get_log_prob(self,
+                      X: torch.Tensor,
+                      y: torch.Tensor,
+                      group_ids: np.ndarray,
+                      res_per_gf: dict) -> torch.Tensor:
         X, y = self._validate_tensors(X, y)
         group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
         if len(self.grouping_factors) > 1:
@@ -134,9 +143,4 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                     "\n- Decrease the learning-rate"
                     "\n- Set `re_scale_penalty`"
                 ) from e
-
-        loss = -torch.cat(log_probs).sum()
-        loss = loss + self._get_re_penalty()
-        if reduce:
-            loss = loss / len(X)
-        return loss
+        return torch.cat(log_probs).sum()
