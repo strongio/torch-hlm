@@ -8,10 +8,10 @@ from scipy.stats import rankdata
 
 from .base import MixedEffectsModule, ReSolver
 
-from .utils import ndarray_to_tensor
+from .utils import ndarray_to_tensor, validate_1d_like
 
 
-class LogisticReSolver(ReSolver):
+class BinomialReSolver(ReSolver):
     _prev_res_per_gf = None
 
     def __init__(self,
@@ -37,7 +37,7 @@ class LogisticReSolver(ReSolver):
                 kwargs['prev_res'] = None
                 kwargs['slow_start'] = 10
             else:
-                # when this solver is used inside of LogisticMixedEffectsModule.fit_loop, we create an instance then
+                # when this solver is used inside of BinomialMixedEffectsModule.fit_loop, we create an instance then
                 # call it on each optimizer step. we re-use the solutions from the last step as a warm start for
                 # *within* this iterative solver
                 kwargs['prev_res'] = self._prev_res_per_gf[gf]
@@ -65,7 +65,7 @@ class LogisticReSolver(ReSolver):
         for gf, kwargs in kwargs_per_gf.items():
             assert self.history
             # this is an iterative solver, each iteration updates the `prev_res`
-            kwargs['prev_res'] = self.history[-1][gf].detach()
+            kwargs['prev_res'] = self.history[-1][gf]
             kwargs['slow_start'] = 2
         return kwargs_per_gf
 
@@ -79,7 +79,8 @@ class LogisticReSolver(ReSolver):
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
                    slow_start: int = 2,
-                   cg: Union[bool, str] = 'detach') -> torch.Tensor:
+                   cg: Union[bool, str] = False  # 'detach'
+                   ) -> torch.Tensor:
         """
         :param X: N*K model-mat
         :param y: N vector
@@ -100,6 +101,8 @@ class LogisticReSolver(ReSolver):
         group_ids_seq = rankdata(group_ids, method='dense') - 1
 
         group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
+
+        assert y.shape == offset.shape, (y.shape, offset.shape)
 
         prev_betas_broad = prev_res[group_ids_seq]
         # predictions:
@@ -137,26 +140,38 @@ class LogisticReSolver(ReSolver):
         return prev_res + step_direction * step_size
 
 
-class LogisticMixedEffectsModule(MixedEffectsModule):
-    solver_cls = LogisticReSolver
-    default_loss_type = 'one_step_ahead'  # TODO: with warning?
-
-    def loss_requires_raneffs(self, likelihood_type: str) -> bool:
-        if likelihood_type in ('one_step_ahead', 'h_likelihood'):
-            return True
-        else:
-            raise NotImplementedError
+class BinomialMixedEffectsModule(MixedEffectsModule):
+    solver_cls = BinomialReSolver
+    default_loss_type = 'h_likelihood'
 
     def _get_h_log_prob(self,
                         X: torch.Tensor,
                         y: torch.Tensor,
                         group_ids: np.ndarray,
-                        res_per_gf: dict) -> torch.Tensor:
-        y = ndarray_to_tensor(y).to(torch.float32)
+                        cache: Optional[dict] = None) -> torch.Tensor:
+        """
+        XXX
+        """
+        X, y = self._validate_tensors(X, y)
+        group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 
-        predicted = self(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+        cache = cache or {}
+        if cache:
+            solver = cache['solver']
+        else:
+            raise NotImplementedError
 
-        log_prob_lik = -torch.nn.BCEWithLogitsLoss(reduction='sum')(predicted, y)
+        yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
+        res_per_gf = solver(
+            fe_offset=yhat_f,  # .detach(),  # TODO: detach is best?
+            prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
+        )
+        yhat_r = self._get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+
+        predicted = yhat_f + yhat_r
+
+        log_prob_lik = torch.distributions.Binomial(logits=predicted).log_prob(y).sum()  # <---- TODO
+
         log_prob_prior = [torch.tensor(0.)]
         for gf, res in res_per_gf.items():
             log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())

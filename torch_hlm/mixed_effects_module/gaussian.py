@@ -39,6 +39,7 @@ class GaussianReSolver(ReSolver):
 
         prior_precision = prior_precision.expand(len(XtX), -1, -1).clone()
 
+        assert y.shape == offset.shape, (y.shape, offset.shape)
         yoff = y - offset
         Xty_els = X * yoff[:, None]
         Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
@@ -57,7 +58,7 @@ class GaussianReSolver(ReSolver):
 
 class GaussianMixedEffectsModule(MixedEffectsModule):
     solver_cls = GaussianReSolver
-    default_loss_type = 'full_likelihood'
+    default_loss_type = 'closed_form'
 
     def __init__(self,
                  fixeff_features: Union[int, Sequence],
@@ -80,30 +81,32 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
     def residual_var(self) -> torch.Tensor:
         return self._residual_std_dev_log.exp() ** 2
 
-    def loss_requires_raneffs(self, likelihood_type: str) -> bool:
-        if likelihood_type == 'full_likelihood':
-            return False
-        elif likelihood_type == 'one_step_ahead':
-            return True
-        else:
-            raise NotImplementedError
+    def _get_loss(self,
+                  X: torch.Tensor,
+                  y: torch.Tensor,
+                  group_ids: np.ndarray,
+                  cache: Optional[dict] = None,
+                  loss_type: Optional[str] = None):
+        if loss_type == 'closed_form':
+            return -self._get_log_prob(X=X, y=y, group_ids=group_ids)
+        return super()._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type)
 
     def _get_log_prob(self,
                       X: torch.Tensor,
                       y: torch.Tensor,
-                      group_ids: np.ndarray,
-                      res_per_gf: dict) -> torch.Tensor:
+                      group_ids: np.ndarray) -> torch.Tensor:
+
         X, y = self._validate_tensors(X, y)
         group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+
         if len(self.grouping_factors) > 1:
-            raise NotImplementedError("`get_loss` for multiple grouping-factors not currently implemented.")
+            raise NotImplementedError
+        # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
         gf = self.grouping_factors[0]
 
         # model-mat for raneffects:
-        col_idx = self.rf_idx[gf]
-        Z = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
+        Z = torch.cat([torch.ones((len(X), 1)), X[:, self.rf_idx[gf]]], 1)
 
-        # for computational efficiency, we'll group by nobs so we can batch MultivariateNormal's __init__ and log_prob
         Xs_by_r = defaultdict(list)
         ys_by_r = defaultdict(list)
         Zs_by_r = defaultdict(list)
@@ -113,15 +116,12 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             Xs_by_r[len(Z_g)].append(X_g)
 
         # compute log-prob per batch:
+        re_dist = self.re_distribution(gf)
         log_probs = []
         for r, y_r in ys_by_r.items():
             ng = len(y_r)
             X_r = torch.stack(Xs_by_r[r])
             Z_r = torch.stack(Zs_by_r[r])
-
-            # cov:
-            cov_r = Z_r @ self.re_distribution(gf).covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1)
 
             # counter-intuitively, it's faster (for `backward()`) if we call this one per batch here (vs. calling for
             # the entire dataset above)
@@ -129,18 +129,17 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             if len(loc.shape) > 2:
                 loc = loc.squeeze(-1)
 
-            # mercifully, if there is one grouping-factor, overall prob is just product of individual probs:
-            try:
-                mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
-                log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
-            except RuntimeError as e:
-                if 'chol' not in str(e):
-                    raise e
-                raise RuntimeError(
-                    "Unable to evaluate log-prob. Things to try:"
-                    "\n- Center/scale predictors"
-                    "\n- Check for extreme-values in the response-variable"
-                    "\n- Decrease the learning-rate"
-                    "\n- Set `re_scale_penalty`"
-                ) from e
+            # mvnorm = LowRankMultivariateNormal(
+            #     loc=loc,
+            #     cov_diag=self.residual_var * torch.eye(r).expand(ng, -1, -1),  # TODO: sample weights applied here?
+            #     cov_factor=Z_r,
+            #     cov_factor_inner=re_dist.covariance_matrix.expand(ng, -1, -1),
+            #     validate_args=False
+            # )
+            cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
+            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1)
+            mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
+
+            log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
+
         return torch.cat(log_probs).sum()

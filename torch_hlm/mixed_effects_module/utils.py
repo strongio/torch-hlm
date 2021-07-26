@@ -27,14 +27,12 @@ def log_chol_to_chol(log_diag: torch.Tensor, off_diag: torch.Tensor) -> torch.Te
     assert log_diag.shape[:-1] == off_diag.shape[:-1]
 
     rank = log_diag.shape[-1]
-    L = torch.diag_embed(torch.exp(log_diag))
+    L1 = torch.diag_embed(torch.exp(log_diag))
 
-    idx = 0
-    for i in range(rank):
-        for j in range(i):
-            L[..., i, j] = off_diag[..., idx]
-            idx += 1
-    return L
+    L2 = torch.zeros_like(L1)
+    mask = torch.tril_indices(rank, rank, offset=-1)
+    L2[mask[0], mask[1]] = off_diag
+    return L1 + L2
 
 
 def chunk_grouped_data(*tensors, group_ids: Sequence):

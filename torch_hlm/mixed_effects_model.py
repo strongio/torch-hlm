@@ -1,4 +1,4 @@
-from typing import Sequence, Optional, Type, Collection, Callable, Tuple, Dict
+from typing import Sequence, Optional, Type, Collection, Callable, Tuple, Dict, Union
 from warnings import warn
 
 import torch
@@ -7,21 +7,10 @@ from sklearn.base import BaseEstimator
 import numpy as np
 import pandas as pd
 
-from torch_hlm.mixed_effects_module import MixedEffectsModule, LogisticMixedEffectsModule
+from torch_hlm.mixed_effects_module import MixedEffectsModule
 
 
 class MixedEffectsModel(BaseEstimator):
-    @classmethod
-    def get_module_cls(cls, response_type: str) -> Type[MixedEffectsModule]:
-        if response_type.lower() == 'gaussian':
-            from torch_hlm.mixed_effects_module import GaussianMixedEffectsModule
-            return GaussianMixedEffectsModule
-        elif response_type.lower() in {'binary', 'logistic'}:
-            from torch_hlm.mixed_effects_module import LogisticMixedEffectsModule
-            return LogisticMixedEffectsModule
-        else:
-            raise ValueError(f"Unrecognized '{response_type}'; currently supported are logistic/binary and gaussian.")
-
     def __init__(self,
                  fixeff_cols: Sequence[str],
                  raneff_design: Dict[str, Sequence[str]],
@@ -52,6 +41,7 @@ class MixedEffectsModel(BaseEstimator):
         self.optimizer_kwargs = optimizer_kwargs
 
         self.module_ = None
+        self.optimizer_ = None
         self.loss_history_ = []
 
         # preserve the ordering where possible
@@ -64,11 +54,31 @@ class MixedEffectsModel(BaseEstimator):
                     continue
                 self.all_model_mat_cols.append(col)
 
+    def fix_re_cov(self, cov: Union[torch.Tensor, Dict[str, torch.Tensor]]):
+        """
+        Fix the random-effects covariance based on known or plausible values.
+
+        :param cov:
+        :return:
+        """
+        self.module_ = self._initialize_module()
+        if len(self.grouping_factors) == 1 and not isinstance(cov, dict):
+            cov = {self.grouping_factors[0]: cov}
+        for gf, gf_cov in cov.items():
+            self.module_.set_re_cov(gf, gf_cov)
+        for v in self.module_._re_cov_params.values():
+            v.requires_grad_(False)
+
     @property
     def grouping_factors(self) -> Sequence[str]:
         return list(self.raneff_design.keys())
 
-    def fit(self, X: pd.DataFrame, y=None, reset: str = 'warn', **kwargs) -> 'MixedEffectsModel':
+    def fit(self,
+            X: pd.DataFrame,
+            y=None,
+            reset: str = 'warn',  # TODO: none?
+            re_cov: bool = True,  # TODO: none?
+            **kwargs) -> 'MixedEffectsModel':
         """
         Initialize and fit the underlying `MixedEffectsModule` until loss converges.
 
@@ -76,6 +86,7 @@ class MixedEffectsModel(BaseEstimator):
         column.
         :param y: Should always be left `None`
         :param reset: For multiple calls to fit, should we reset? Defaults to yes with a warning.
+        :param re_cov: XXX
         :param kwargs: Further keyword-args to pass to partial_fit
         :return: This instance, now fitted.
         """
@@ -102,14 +113,14 @@ class MixedEffectsModel(BaseEstimator):
         if y is None:
             raise ValueError(f"`X` is missing column '{self.response_colname}'")
 
-        self.partial_fit(X=X, y=y, group_ids=group_ids, max_num_epochs=None, **kwargs)
+        self.partial_fit(X=X, y=y, group_ids=group_ids, max_num_epochs=None, re_cov=re_cov, **kwargs)
         return self
 
     def partial_fit(self,
                     X: np.ndarray,
                     y: np.ndarray,
                     group_ids: Sequence,
-                    optimize_re_cov: bool = True,
+                    re_cov: bool = True,
                     callbacks: Collection[Callable] = (),
                     max_num_epochs: Optional[int] = 1,
                     early_stopping: Tuple[float, int] = (.001, 2),
@@ -120,7 +131,7 @@ class MixedEffectsModel(BaseEstimator):
         :param X: From `build_model_mats()`
         :param y: From `build_model_mats()`
         :param group_ids: From `build_model_mats()`
-        :param optimize_re_cov: Should the random-effects covariance matrix be optimized?
+        :param re_cov: Should the random-effects covariance matrix be optimized?
         :param callbacks: Functions to call on each epoch. Takes a single argument, the loss-history for this call to
         partial_fit.
         :param max_num_epochs: The maximum number of epochs to fit. For similarity to other sklearn estimator's
@@ -133,6 +144,16 @@ class MixedEffectsModel(BaseEstimator):
         if self.module_ is None:
             self.module_ = self._initialize_module()
 
+        if isinstance(re_cov, (dict, torch.Tensor)):
+            self.fix_re_cov(re_cov)
+        elif isinstance(re_cov, bool):
+            for p in self.module_.parameters():
+                if self.module_._is_cov_param(p):
+                    p.requires_grad_(re_cov)
+
+        if self.optimizer_ is None:
+            self.optimizer_ = self._initialize_optimizer()
+
         if max_num_epochs is None:
             max_num_epochs = float('inf')
         assert max_num_epochs > 0
@@ -143,7 +164,7 @@ class MixedEffectsModel(BaseEstimator):
             X=X,
             y=y,
             group_ids=group_ids,
-            optimizer=self._initialize_optimizer(optimize_re_cov),
+            optimizer=self.optimizer_,
             **kwargs
         )
         self.loss_history_.append([])  # a separate loss-history for each call to `fit()`
@@ -172,6 +193,8 @@ class MixedEffectsModel(BaseEstimator):
     def build_model_mats(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         X = np.empty((len(df.index), len(self.all_model_mat_cols)))
         for i, col in enumerate(self.all_model_mat_cols):
+            if df[col].isnull().any():
+                raise ValueError(f"Nans in `{col}`")
             X[:, i] = df[col].values
         group_ids = df[self.grouping_factors].values
         y = None  # ok to omit in `predict`
@@ -196,18 +219,14 @@ class MixedEffectsModel(BaseEstimator):
                 module_kwargs['fixeff_features'].append(i)
 
         # initialize module:
-        module_cls = self.get_module_cls(self.response_type)
-        return module_cls(**module_kwargs)
+        return MixedEffectsModule.from_name(self.response_type, **module_kwargs)
 
-    def _initialize_optimizer(self, optimize_re_cov: bool) -> torch.optim.Optimizer:
+    def _initialize_optimizer(self) -> torch.optim.Optimizer:
         optimizer_kwargs = {'lr': .001}
         if issubclass(self.optimizer_cls, torch.optim.LBFGS):
             optimizer_kwargs.update(lr=.10, max_eval=12)
         optimizer_kwargs.update(self.optimizer_kwargs or {})
-        optimizer_kwargs['params'] = []
-        for p in self.module_.parameters():
-            if optimize_re_cov or not self.module_._is_cov_param(p):
-                optimizer_kwargs['params'].append(p)
+        optimizer_kwargs['params'] = [p for p in self.module_.parameters() if p.requires_grad]
         return self.optimizer_cls(**optimizer_kwargs)
 
     def predict(self, X: pd.DataFrame, group_data: pd.DataFrame) -> np.ndarray:
@@ -217,34 +236,16 @@ class MixedEffectsModel(BaseEstimator):
         used to generate predictions for X. Same format as X, except the response-column must also be included.
         :return: An ndarray of predictions
         """
-        yhat = self._predict(X=X, group_data=group_data)
-        if isinstance(self.module_, LogisticMixedEffectsModule):
-            return (yhat > 0).astype('float')
-        else:
-            return yhat
+        return self._predict(X=X, group_data=group_data)
 
-    def predict_proba(self, X: pd.DataFrame, group_data: pd.DataFrame) -> np.ndarray:
-        """
-        Predict probability of positive class if response_type is 'binary'.
-        :param X: A dataframe with the predictors for fixed and random effects, as well as the group-id column.
-        :param group_data: Historical data that will be used to obtain RE-estimates for each group, which will the be
-        used to generate predictions for X. Same format as X, except the response-column must also be included.
-        :return: An ndarray of probabilities
-        """
-        yhat = self._predict(X=X, group_data=group_data)
-        if isinstance(self.module_, LogisticMixedEffectsModule):
-            return expit(yhat)
-        else:
-            raise TypeError("`predict_proba` unexpected unless `response_type` is binary")
-
+    @torch.no_grad()
     def _predict(self, X: pd.DataFrame, group_data: pd.DataFrame) -> np.ndarray:
-        with torch.no_grad():
-            X, _, group_ids = self.build_model_mats(X)
-            X_t, y_t, group_ids_t = self.build_model_mats(group_data)
-            if y_t is None:
-                raise RuntimeError(
-                    f"`group_data` must include the response ('{self.response_colname}'), so that random-effects can "
-                    f"be computed."
-                )
-            pred = self.module_(X, group_ids=group_ids, re_solve_data=(X_t, y_t, group_ids_t))
-            return pred.numpy()
+        X, _, group_ids = self.build_model_mats(X)
+        X_t, y_t, group_ids_t = self.build_model_mats(group_data)
+        if y_t is None:
+            raise RuntimeError(
+                f"`group_data` must include the response ('{self.response_colname}'), so that random-effects can "
+                f"be computed."
+            )
+        pred = self.module_(X, group_ids=group_ids, re_solve_data=(X_t, y_t, group_ids_t))
+        return pred.numpy()

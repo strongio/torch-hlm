@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type
+from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type, Any
 from warnings import warn
 
 import torch
@@ -14,7 +14,20 @@ class MixedEffectsModule(torch.nn.Module):
     """
     Base-class for a torch.nn.Module that can be trained with mixed-effects
     """
+
     solver_cls: Type['ReSolver'] = None
+    default_loss_type: str = None
+    _nm2cls = {}
+
+    def __init_subclass__(cls, **kwargs):
+        cls._nm2cls[cls.__name__.replace('MixedEffectsModule', '').lower()] = cls
+
+    @classmethod
+    def from_name(cls, name: str, *args, **kwargs) -> 'MixedEffectsModule':
+        klass = cls._nm2cls.get(name)
+        if klass is None:
+            raise TypeError(f"Unrecognized `name`, options: {set(cls._nm2cls)}")
+        return klass(*args, **kwargs)
 
     def __init__(self,
                  fixeff_features: Union[int, Sequence],
@@ -27,7 +40,7 @@ class MixedEffectsModule(torch.nn.Module):
         :param fixeff_features: The column-indices of features for fixed-effects model matrix (not including
         bias/intercept); if a single integer is passed then these indices are `range(fixeff_features)`
         :param raneff_features: If there is a single grouping factor, then this argument is like `fixeff_features`: the
-        indices in the mode-matrix corresponding to random-effects. If there are multiple grouping factors, then the
+        indices in the model-matrix corresponding to random-effects. If there are multiple grouping factors, then the
         keys are grouping factor labels and the values are these indices.
         :param fixed_effects_nn: An optional torch.nn.Module for the fixed-effects. The default is to create a
         `torch.nn.Linear(num_fixed_features, 1)`.
@@ -56,11 +69,8 @@ class MixedEffectsModule(torch.nn.Module):
             self.ff_idx = list(fixeff_features)
         if fixed_effects_nn is None:
             fixed_effects_nn = torch.nn.Linear(num_fixed_features, 1)
-            fixed_effects_nn.weight.data[:] = .01 * torch.randn(num_fixed_features)
-        else:
-            for p in fixed_effects_nn.parameters():
-                if p.dtype != torch.float32:
-                    warn("`fixed_effects_nn` doesn't use torch.float32")
+            with torch.no_grad():
+                fixed_effects_nn.weight[:] = .01 * torch.randn(num_fixed_features)
         self.fixed_effects_nn = fixed_effects_nn
 
         # random effects:
@@ -79,9 +89,6 @@ class MixedEffectsModule(torch.nn.Module):
         if not isinstance(re_scale_penalty, dict):
             re_scale_penalty = {gf: float(re_scale_penalty) for gf in self.grouping_factors}
         self.re_scale_penalty = re_scale_penalty
-
-    def loss_requires_raneffs(self, likelihood_type: str) -> bool:
-        raise NotImplementedError
 
     @property
     def residual_var(self) -> Union[torch.Tensor, float]:
@@ -131,7 +138,8 @@ class MixedEffectsModule(torch.nn.Module):
 
         try:
             dist = torch.distributions.MultivariateNormal(
-                loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix
+                loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix,
+                validate_args=False
             )
         except RuntimeError as e:
             if 'cholesky' not in str(e):
@@ -273,8 +281,7 @@ class MixedEffectsModule(torch.nn.Module):
                  y: Union[torch.Tensor, np.ndarray],
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
-                 loss_type: Optional[str] = None,
-                 solver_kwargs: dict = None) -> Iterator[float]:
+                 loss_type: Optional[str] = None) -> Iterator[float]:
 
         X, y = self._validate_tensors(X, y)
         group_ids = self._validate_group_ids(group_ids, len(self.grouping_factors))
@@ -297,34 +304,19 @@ class MixedEffectsModule(torch.nn.Module):
             progress = tqdm(total=1)
 
         # initialize the solver:
-        solver_kwargs = solver_kwargs or {}
-        if self.loss_requires_raneffs(loss_type):
-            solver = self.solver_cls(
-                X=X,
-                y=y,
-                group_ids=group_ids,
-                design=self.rf_idx,
-                prior_precisions=self._get_prior_precisions(detach=True) if fixed_cov else None
-            )
-        elif solver_kwargs:
-            warn(f"`solver_kwargs` will be ignored, `{type(self).__name__}.fit()` does not require re-solve.")
+        cache = {'solver': self.solver_cls(
+            X=X,
+            y=y,
+            group_ids=group_ids,
+            design=self.rf_idx,
+            prior_precisions=self._get_prior_precisions(detach=True) if fixed_cov else None
+        )}
 
         # create the closure which returns the loss
         def closure():
             optimizer.zero_grad()
-
-            loss_kwargs = {'X': X, 'y': y, 'group_ids': group_ids, 'type': loss_type}
-            if self.loss_requires_raneffs(loss_type):
-                yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
-                loss_kwargs['res_per_gf'] = solver(
-                    fe_offset=yhat_f.detach(),
-                    prior_precisions=None if fixed_cov else self._get_prior_precisions(detach=False),
-                    **solver_kwargs
-                )
-            else:
-                loss_kwargs['res_per_gf'] = None
-
-            loss = self.get_loss(**loss_kwargs)
+            # TODO: currently no way to pass kwargs to solver.__call__
+            loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache)
             loss.backward()
             if progress:
                 progress.update()
@@ -344,47 +336,55 @@ class MixedEffectsModule(torch.nn.Module):
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
-                 res_per_gf: dict,
-                 type: Optional[str] = None,
+                 cache: Optional[dict] = None,
+                 loss_type: Optional[str] = None,
                  reduce: bool = True) -> torch.Tensor:
-        if type is None:
-            type = self.default_loss_type
-
-        if type == 'one_step_ahead':
-            loss = -self._get_one_step_ahead_log_prob(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
-        elif type == 'full_likelihood':  # TODO better name
-            loss = -self._get_log_prob(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
-        elif type == 'h_likelihood':
-            loss = -self._get_h_log_prob(X=X, y=y, group_ids=group_ids, res_per_gf=res_per_gf)
-        else:
-            raise ValueError(f"Unknown type {type}")
+        if loss_type is None:
+            loss_type = self.default_loss_type
+        loss = self._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type)
         loss = loss + self._get_re_penalty()
         if reduce:
             loss = loss / len(X)
         return loss
 
-    def _get_one_step_ahead_log_prob(self,
-                                     X: torch.Tensor,
-                                     y: torch.Tensor,
-                                     group_ids: np.ndarray,
-                                     res_per_gf: dict) -> torch.Tensor:
-        raise NotImplementedError("TODO")
+    def _get_loss(self,
+                  X: torch.Tensor,
+                  y: torch.Tensor,
+                  group_ids: np.ndarray,
+                  cache: Optional[dict] = None,
+                  loss_type: Optional[str] = None):
+        if loss_type.startswith('1step'):
+            return self._get_1step_loss(X=X, y=y, group_ids=group_ids, cache=cache)
+        elif loss_type == 'h_likelihood':
+            return -self._get_h_log_prob(X=X, y=y, group_ids=group_ids, cache=cache)
+        else:
+            raise NotImplementedError(f"{type(self).__name__} does not implement type={loss_type}")
 
-    def _get_log_prob(self,
-                      X: torch.Tensor,
-                      y: torch.Tensor,
-                      group_ids: np.ndarray,
-                      res_per_gf: dict) -> torch.Tensor:
-        raise NotImplementedError
+    def _get_1step_loss(self,
+                        X: torch.Tensor,
+                        y: torch.Tensor,
+                        group_ids: np.ndarray,
+                        cache: Optional[dict] = None):
+        """
+        Compute a loss that is comparable to 1-step ahead error in forecasting: within each group, we calcluate the
+        random effects for observations 1-K, then compute the loss on K+1. We do this for all possible Ks.
+        :return:
+        """
+        raise RuntimeError("TODO")
 
     def _get_h_log_prob(self,
                         X: torch.Tensor,
                         y: torch.Tensor,
                         group_ids: np.ndarray,
-                        res_per_gf: dict) -> torch.Tensor:
+                        cache: Optional[dict] = None) -> torch.Tensor:
         raise NotImplementedError
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:
+        """
+        In some settings, optimization will fail because the variance on some random effects
+        is too high (e.g. if there are a very large number of observations per group, the random-intercept might have
+        high variance) which causes numerical issues. Setting `re_scale_penalty>0` can help in these cases. This
+        """
         penalties = []
         for gf, precision in self.re_scale_penalty.items():
             if not precision:
@@ -438,25 +438,25 @@ class MixedEffectsModule(torch.nn.Module):
 
 
 class ReSolver:
+    """
+    :param X: A model-matrix Tensor
+    :param y: A response/target Tensor
+    :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
+    tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+    :param design: An ordered dictionary whose keys are grouping-factor labels and whose values are column-indices
+    in `X` that are used for the random-effects of that grouping factor.
+    :param prior_precisions: A dictionary with the precision matrices for each grouping factor. Should only be
+    passed here if this solver is not being used in a context where the precision matrices are optimized. If the
+    precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
+    """
+
     def __init__(self,
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
                  design: dict,
                  prior_precisions: Optional[dict] = None):
-        """
-        Initialize this random-effects solver
 
-        :param X: A model-matrix Tensor
-        :param y: A response/target Tensor
-        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
-        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
-        :param design: An ordered dictionary whose keys are grouping-factor labels and whose values are column-indices
-        in `X` that are used for the random-effects of that grouping factor.
-        :param prior_precisions: A dictionary with the precision matrices for each grouping factor. Should only be
-        passed here if this solver is not being used in a context where the precision matrices are optimized. If the
-        precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
-        """
         self.X, self.y = MixedEffectsModule._validate_tensors(X, y)
         self.group_ids = MixedEffectsModule._validate_group_ids(group_ids, num_grouping_factors=len(design))
         self.design = design
@@ -511,6 +511,7 @@ class ReSolver:
             if self._check_convergence(tol=tol):
                 # TODO: verbose
                 # TODO: patience
+                # TODO: if only one grouping factor, drop converged groups
                 break
 
             # recompute offset, etc:
@@ -575,7 +576,7 @@ class ReSolver:
                     if gf1 == gf2:
                         continue
                     out[gf1]['offset'].append(yhat_r[:, i])
-                out[gf1]['offset'] = torch.sum(torch.stack(out[gf1]['offset']))
+                out[gf1]['offset'] = torch.sum(torch.stack(out[gf1]['offset']), 0)
 
         return out
 
