@@ -2,7 +2,7 @@ from typing import Sequence, Optional, Type, Collection, Callable, Tuple, Dict, 
 from warnings import warn
 
 import torch
-from scipy.special import expit
+
 from sklearn.base import BaseEstimator
 import numpy as np
 import pandas as pd
@@ -77,7 +77,7 @@ class MixedEffectsModel(BaseEstimator):
             X: pd.DataFrame,
             y=None,
             reset: str = 'warn',  # TODO: none?
-            re_cov: bool = True,  # TODO: none?
+            re_cov: Union[bool, torch.Tensor] = True,  # TODO: none?
             **kwargs) -> 'MixedEffectsModel':
         """
         Initialize and fit the underlying `MixedEffectsModule` until loss converges.
