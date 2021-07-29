@@ -22,7 +22,8 @@ class GaussianReSolver(ReSolver):
                    offset: torch.Tensor,
                    group_ids: np.ndarray,
                    XtX: torch.Tensor,
-                   prior_precision: torch.Tensor) -> torch.Tensor:
+                   prior_precision: torch.Tensor,
+                   prev_res: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         :param X: N*K Tensor model-matrix
         :param y: N Tensor of target/response
@@ -42,15 +43,23 @@ class GaussianReSolver(ReSolver):
         prior_precision = prior_precision.expand(len(XtX), -1, -1).clone()
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
+
+        if prev_res is not None:
+            offset = offset + (prev_res[group_ids_seq] * X).sum(1)
+
         yoff = y - offset
         Xty_els = X * yoff.unsqueeze(1)
         Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)  # TODO: sample_weights
 
-        # TODO: if multiple-grouping factors, would it be better to use iterative (e.g. 1/2 newton step) procudure?
-        #    would need to pass `prev_res` as in binomial
-        res, _ = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)
+        # # TODO: if multiple-grouping factors, would it be better to use iterative (e.g. 1/2 newton step) procudure?
+        # XtX = XtX / len(X)
+        # Xty = Xty / len(X)
 
-        return res.squeeze(-1)
+        res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
+
+        if prev_res is not None:
+            res = prev_res + res
+        return res
 
     def _check_if_converged(self, reltol: float) -> bool:
         if len(self.design) == 1:

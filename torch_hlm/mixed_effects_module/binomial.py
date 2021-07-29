@@ -103,9 +103,9 @@ class BinomialReSolver(ReSolver):
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
 
-        prev_betas_broad = prev_res[group_ids_seq]
+        prev_res_broad = prev_res[group_ids_seq]
         # predictions:
-        yhat = ((X * prev_betas_broad).sum(1) + offset)
+        yhat = ((X * prev_res_broad).sum(1) + offset)
         prob = torch.sigmoid(yhat)
         # prob = 1.0 / (1.0 + (-yhat).exp())
 

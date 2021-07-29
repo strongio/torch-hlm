@@ -16,10 +16,10 @@ from torch_hlm.simulate import simulate_raneffects
 
 class TestTraining(unittest.TestCase):
 
-    @parameterized.expand([('binary',), ('gaussian',)])
+    @parameterized.expand([('gaussian', [0, 0]), ('binary', [0, 0, 0])])
     def test_training_multiple_gf(self,
-                                  response_type: str = 'binary',
-                                  num_res: Sequence[int] = (0, 0),
+                                  response_type: str,
+                                  num_res: Sequence[int],
                                   intercept: float = -1.,
                                   noise: float = 1.0):
         print("`test_training_multiple_gf()` with config `{}`".
@@ -97,7 +97,7 @@ class TestTraining(unittest.TestCase):
             print(df_corr)
             raise
 
-        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .25)
+        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .13 * len(num_res))
         wt = model.module_.fixed_effects_nn.weight.squeeze()
         if len(wt):
             self.assertLess(abs(wt[0] - .5), .1)
