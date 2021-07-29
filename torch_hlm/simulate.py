@@ -2,8 +2,9 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
 
-from torch_hlm.mixed_effects_module.utils import log_chol_to_chol, ndarray_to_tensor
+from torch_hlm.mixed_effects_module.utils import log_chol_to_chol
 
 
 def simulate_raneffects(num_groups: int,
@@ -61,7 +62,7 @@ def simulate_raneffects(num_groups: int,
 def _random_cov_mat(rank: int, eps: float = .001) -> np.ndarray:
     L_log_diag = np.random.randn(rank)
     L_off_diag = np.random.randn(int(rank * (rank - 1) / 2))
-    L = log_chol_to_chol(ndarray_to_tensor(L_log_diag), ndarray_to_tensor(L_off_diag)).numpy()
+    L = log_chol_to_chol(torch.as_tensor(L_log_diag), torch.as_tensor(L_off_diag)).numpy()
     return (L @ L.T) + eps * np.eye(rank)
 
 

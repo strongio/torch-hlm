@@ -7,8 +7,10 @@ import numpy as np
 from scipy.stats import rankdata
 
 from .base import MixedEffectsModule, ReSolver
-from .utils import chunk_grouped_data
+from .utils import chunk_grouped_data, validate_tensors, validate_group_ids
 from torch.distributions import MultivariateNormal
+
+from torch_hlm.low_rank import LowRankMultivariateNormal
 
 
 class GaussianReSolver(ReSolver):
@@ -42,7 +44,7 @@ class GaussianReSolver(ReSolver):
         assert y.shape == offset.shape, (y.shape, offset.shape)
         yoff = y - offset
         Xty_els = X * yoff[:, None]
-        Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
+        Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)  # TODO: sample_weights
 
         # res = torch.inverse(XtX + prior_precision) @ Xty.unsqueeze(-1)
         res, _ = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)
@@ -64,14 +66,14 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                  fixeff_features: Union[int, Sequence],
                  raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
-                 covariance_parameterization: str = 'log_cholesky',
+                 covariance: str = 'log_cholesky',
                  re_scale_penalty: Union[float, dict] = 0.,
                  verbose: int = 1):
         super().__init__(
             fixeff_features=fixeff_features,
             raneff_features=raneff_features,
             fixed_effects_nn=fixed_effects_nn,
-            covariance_parameterization=covariance_parameterization,
+            covariance=covariance,
             re_scale_penalty=re_scale_penalty,
             verbose=verbose
         )
@@ -96,8 +98,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                       y: torch.Tensor,
                       group_ids: np.ndarray) -> torch.Tensor:
 
-        X, y = self._validate_tensors(X, y)
-        group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+        X, y = validate_tensors(X, y)
+        group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 
         if len(self.grouping_factors) > 1:
             raise NotImplementedError

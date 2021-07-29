@@ -1,5 +1,4 @@
-from typing import Sequence, Optional, Iterable, Union, Dict
-from warnings import warn
+from typing import Sequence, Optional, Union, Dict
 
 import torch
 import numpy as np
@@ -8,7 +7,7 @@ from scipy.stats import rankdata
 
 from .base import MixedEffectsModule, ReSolver
 
-from .utils import ndarray_to_tensor, validate_1d_like
+from .utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r
 
 
 class BinomialReSolver(ReSolver):
@@ -79,7 +78,7 @@ class BinomialReSolver(ReSolver):
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
                    slow_start: int = 2,
-                   cg: Union[bool, str] = False  # 'detach'
+                   cg: Union[bool, str] = False  # 'detach' #TODO
                    ) -> torch.Tensor:
         """
         :param X: N*K model-mat
@@ -107,6 +106,7 @@ class BinomialReSolver(ReSolver):
         prev_betas_broad = prev_res[group_ids_seq]
         # predictions:
         yhat = ((X * prev_betas_broad).sum(1) + offset)
+        # prob = torch.sigmoid(yhat)
         prob = 1.0 / (1.0 + (-yhat).exp())
 
         # grad:
@@ -150,10 +150,10 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
                         group_ids: np.ndarray,
                         cache: Optional[dict] = None) -> torch.Tensor:
         """
-        XXX
+        TODO: generalize outside of binomial
         """
-        X, y = self._validate_tensors(X, y)
-        group_ids = self._validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+        X, y = validate_tensors(X, y)
+        group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 
         cache = cache or {}
         if cache:
@@ -163,14 +163,14 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
 
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
         res_per_gf = solver(
-            fe_offset=yhat_f,  # .detach(),  # TODO: detach is best?
+            fe_offset=yhat_f,
             prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
         )
-        yhat_r = self._get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+        yhat_r = get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf).sum(1)
 
         predicted = yhat_f + yhat_r
 
-        log_prob_lik = torch.distributions.Binomial(logits=predicted).log_prob(y).sum()  # <---- TODO
+        log_prob_lik = torch.distributions.Binomial(logits=predicted).log_prob(y).sum()
 
         log_prob_prior = [torch.tensor(0.)]
         for gf, res in res_per_gf.items():

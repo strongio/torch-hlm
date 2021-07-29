@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from torch_hlm.mixed_effects_module import MixedEffectsModule
+from torch_hlm.mixed_effects_module.utils import get_to_kwargs
 
 
 class MixedEffectsModel(BaseEstimator):
@@ -66,8 +67,8 @@ class MixedEffectsModel(BaseEstimator):
             cov = {self.grouping_factors[0]: cov}
         for gf, gf_cov in cov.items():
             self.module_.set_re_cov(gf, gf_cov)
-        for v in self.module_._re_cov_params.values():
-            v.requires_grad_(False)
+            for p in self.module_.covariance[gf].parameters():
+                p.requires_grad_(False)
 
     @property
     def grouping_factors(self) -> Sequence[str]:
@@ -103,10 +104,7 @@ class MixedEffectsModel(BaseEstimator):
                 std_devs = torch.ones(len(idx) + 1)
                 if len(idx):
                     std_devs[1:] *= (.5 / np.sqrt(len(idx)))
-                try:
-                    self.module_.set_re_cov(gf, cov=torch.diag_embed(std_devs ** 2))
-                except NotImplementedError:
-                    pass
+                self.module_.set_re_cov(gf, cov=torch.diag_embed(std_devs ** 2))
 
         # build-model-mat:
         X, y, group_ids = self.build_model_mats(X)
@@ -159,6 +157,9 @@ class MixedEffectsModel(BaseEstimator):
         assert max_num_epochs > 0
         tol, patience = early_stopping
 
+        X = torch.as_tensor(X, **get_to_kwargs(self.module_))
+        y = torch.as_tensor(y, **get_to_kwargs(self.module_))
+
         callbacks = list(callbacks)
         fit_loop = self.module_.fit_loop(
             X=X,
@@ -190,16 +191,18 @@ class MixedEffectsModel(BaseEstimator):
                 break
         return self
 
-    def build_model_mats(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        X = np.empty((len(df.index), len(self.all_model_mat_cols)))
+    def build_model_mats(self, df: pd.DataFrame) -> Tuple[torch.Tensor, Optional[torch.Tensor], np.ndarray]:
+        X = np.empty((len(df.index), len(self.all_model_mat_cols)), dtype='float32')
         for i, col in enumerate(self.all_model_mat_cols):
             if df[col].isnull().any():
                 raise ValueError(f"Nans in `{col}`")
             X[:, i] = df[col].values
+        X = torch.as_tensor(X, **get_to_kwargs(self.module_))
         group_ids = df[self.grouping_factors].values
         y = None  # ok to omit in `predict`
         if self.response_colname in df.columns:
             y = df[self.response_colname].values
+            y = torch.as_tensor(y, **get_to_kwargs(self.module_))
         return X, y, group_ids
 
     def _initialize_module(self) -> MixedEffectsModule:

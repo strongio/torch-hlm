@@ -1,4 +1,4 @@
-from typing import Union, Sequence
+from typing import Sequence, Iterator
 
 import torch
 import numpy as np
@@ -12,14 +12,6 @@ def validate_1d_like(x):
                 x = x.squeeze(-1)
     if len(x.shape) != 1:
         raise ValueError(f"Expected 1D tensor; instead got `{x.shape}`")
-    return x
-
-
-def ndarray_to_tensor(x: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
-    if isinstance(x, np.ndarray):
-        return torch.from_numpy(x)
-    elif not isinstance(x, torch.Tensor):
-        raise TypeError(f"`{type(x)}` should have been a tensor or ndarray")
     return x
 
 
@@ -57,3 +49,54 @@ def chunk_grouped_data(*tensors, group_ids: Sequence):
     for chunk_tensors in zip(*(torch.split(x, counts_per_group) for x in tensors)):
         group_data.append(chunk_tensors)
     return group_data
+
+
+def validate_tensors(*args) -> Iterator:
+    for arg in args:
+        # arg = torch.as_tensor(arg)
+        if torch.isnan(arg).any():
+            raise ValueError("`nans` in tensor")
+        if torch.isinf(arg).any():
+            raise ValueError("`infs` in tensor")
+        yield arg
+
+
+def validate_group_ids(group_ids: Sequence, num_grouping_factors: int) -> np.ndarray:
+    group_ids = np.asanyarray(group_ids)
+    if num_grouping_factors > 1:
+        if len(group_ids.shape) != 2 or len(group_ids.shape[1]) != num_grouping_factors:
+            raise ValueError(
+                f"There are {num_grouping_factors} grouping-factors, so `group_ids` should be 2d with 2nd "
+                f"dimension of this extent."
+            )
+    else:
+        group_ids = validate_1d_like(group_ids)[:, None]
+    return group_ids
+
+
+def get_yhat_r(design: dict,
+               X: torch.Tensor,
+               group_ids: np.ndarray,
+               res_per_gf: dict) -> torch.Tensor:
+    """
+    Get yhat for random-effects.
+
+    :param design: A dictionary with keys as grouping factors and values as indices in the model-matrix.
+    :param X: The model-matrix.
+    :param group_ids: The group-ids.
+    :param res_per_gf: A dictionary with keys as grouping factors and values as random-effect coefficients.
+    :return: A tensor with rows corresponding to the model-matrix and columns corresponding to the grouping-factors.
+    """
+    yhat_r = torch.empty(*group_ids.shape)
+    for i, (gf, col_idx) in enumerate(design.items()):
+        Xr = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
+        _, group_idx = np.unique(group_ids[:, i], return_inverse=True)
+        betas_broad = res_per_gf[gf][group_idx]
+        yhat_r[:, i] = (Xr * betas_broad).sum(1)
+    return yhat_r
+
+
+def get_to_kwargs(x) -> dict:
+    if isinstance(x, torch.nn.Module):
+        return get_to_kwargs(next(iter(x.parameters())))
+    return {'dtype': x.dtype, 'device': x.device}
