@@ -1,3 +1,11 @@
+"""
+"log_cholesky", parameterizes the random-effects covariance using the cholesky factorization (which is itself split
+into two tensors: the log-transformed diagonal elements and the off-diagonal). The other supported option is "low_rank",
+ which parameterizes the covariance with two tensors: (a) the log-transformed std-devations, and (b) a 'low rank' G*K
+tensor where G is the number of random-effects and K is int(sqrt(G)). Then the covariance is D + V @ V.t() where D is a
+diagonal-matrix with the std-deviations**2, and V is the low-rank tensor.
+"""
+
 import math
 from typing import Optional
 

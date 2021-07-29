@@ -78,7 +78,7 @@ class BinomialReSolver(ReSolver):
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
                    slow_start: int = 2,
-                   cg: Union[bool, str] = False  # 'detach' #TODO
+                   cg: Union[bool, str] = True
                    ) -> torch.Tensor:
         """
         :param X: N*K model-mat

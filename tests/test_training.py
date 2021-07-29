@@ -12,6 +12,11 @@ from torch_hlm.simulate import simulate_raneffects
 
 
 class TestTraining(unittest.TestCase):
+    expected_re_corr = {
+        'binary': (.79, .865),
+        'gaussian': (.90, .94)
+    }
+
     @parameterized.expand([('binary',), ('gaussian',)])
     @torch.no_grad()
     def test_training_single_gf(self,
@@ -58,18 +63,17 @@ class TestTraining(unittest.TestCase):
 
         # FIT MODEL -----
         predictors = df_train.columns[df_train.columns.str.startswith('x')].tolist()
+        covariance = 'log_cholesky'
+        if response_type.startswith('bin'):
+            covariance = torch.as_tensor(df_raneff_true.drop(columns='group').cov().values)
         model = MixedEffectsModel(
             fixeff_cols=predictors,
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design={'group': predictors},
-            response_colname='y'
+            response='y',
+            covariance=covariance
         )
-
-        if response_type.startswith('bin'):
-            true_cov = torch.as_tensor(df_raneff_true.drop(columns='group').cov().values, dtype=torch.float32)
-            model.fit(df_train, re_cov=true_cov)
-        else:
-            model.fit(df_train)
+        model.fit(df_train)
 
         # COMPARE TRUE vs. EST -----
         with torch.no_grad():
@@ -83,8 +87,12 @@ class TestTraining(unittest.TestCase):
             reset_index()
         df_compare.columns.name = None
 
-        self.assertTrue(
-            (df_compare.groupby('variable')[['true', 'est']].corr().reset_index(0).loc['true', 'est'] > .80).all()
-        )
-
+        df_corr = df_compare.groupby('variable')[['true', 'est']].corr().reset_index(0)
+        lower, mean = self.expected_re_corr[response_type]
+        try:
+            self.assertGreater(df_corr.loc['true', 'est'].min(), lower)
+            self.assertGreater(df_corr.loc['true', 'est'].mean(), mean)
+        except AssertionError:
+            print(df_corr)
+            raise
         # TODO: fixed-effects

@@ -20,4 +20,5 @@ setuptools.setup(
         'scikit-learn>=0.23.2',
         'pandas>=1.0'
     ],
+    python_requires='>=3.8'
 )
