@@ -152,6 +152,12 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
         """
         TODO: generalize outside of binomial
         """
+        if not self.fixed_cov:
+            raise RuntimeError(
+                f"Cannot use `h_likelihood` when optimizing covariance. Need to pass known covariances to "
+                f"``{type(self).__name__}.set_re_cov()``, or need to change ``loss_type``."
+            )
+
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 

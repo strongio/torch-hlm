@@ -235,6 +235,17 @@ class MixedEffectsModule(torch.nn.Module):
             prior_precisions=self._get_prior_precisions(detach=True)
         )
 
+    @property
+    def fixed_cov(self) -> bool:
+        # check whether cov is fixed. if so, can avoid passing it on each call to `closure`.
+        # this is useful for subclasses (e.g. Logistic) that do expensive operations on cov
+        fixed_cov = True
+        for p in self.parameters():
+            if p.requires_grad and self._is_cov_param(p):
+                fixed_cov = False
+                break
+        return fixed_cov
+
     # fitting --------
     def fit_loop(self,
                  X: torch.Tensor,
@@ -245,15 +256,6 @@ class MixedEffectsModule(torch.nn.Module):
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, len(self.grouping_factors))
-
-        # check whether cov is fixed. if so, can avoid passing it on each call to `closure`.
-        # this is useful for subclasses (e.g. Logistic) that do expensive operations on cov
-        fixed_cov = True
-        for grp in optimizer.param_groups:
-            for p in grp['params']:
-                if self._is_cov_param(p):
-                    fixed_cov = False
-                    break
 
         # progress bar
         if not self.verbose:
@@ -269,7 +271,7 @@ class MixedEffectsModule(torch.nn.Module):
             y=y,
             group_ids=group_ids,
             design=self.rf_idx,
-            prior_precisions=self._get_prior_precisions(detach=True) if fixed_cov else None
+            prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None
         )}
 
         # TODO self.verbose>1 to solver

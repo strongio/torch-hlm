@@ -105,7 +105,7 @@ class MixedEffectsModel(BaseEstimator):
                     callbacks: Collection[Callable] = (),
                     max_num_epochs: Optional[int] = 1,
                     early_stopping: Tuple[float, int] = (.001, 2),
-                    **kwargs) -> 'MixedEffectsModel':
+                    loss_type: Optional[str] = None) -> 'MixedEffectsModel':
         """
         (Partially) fit the underlying ``MixedEffectsModule``.
 
@@ -119,14 +119,14 @@ class MixedEffectsModel(BaseEstimator):
          epoch.
         :param early_stopping: If ``num_epochs > 1``, then early-stopping critierion can be supplied: a tuple with
          ``(tolerance, patience)`` (defaults to loss-diff < .001 for 2 iters).
-        :param kwargs: Further keyword-arguments passed to `MixedEffectsModule.fit_loop()`
+        :param loss_type: TODO
         :return: This instance
         """
         if self.module_ is None:
-            self._initialize_module()
+            self.module_ = self._initialize_module()
 
         if self.optimizer_ is None:
-            self._initialize_optimizer()
+            self.optimizer_ = self._initialize_optimizer()
 
         if max_num_epochs is None:
             max_num_epochs = float('inf')
@@ -142,7 +142,7 @@ class MixedEffectsModel(BaseEstimator):
             y=y,
             group_ids=group_ids,
             optimizer=self.optimizer_,
-            **kwargs
+            loss_type=loss_type
         )
         if not getattr(self, 'loss_history_', None):
             self.loss_history_ = []
@@ -157,6 +157,10 @@ class MixedEffectsModel(BaseEstimator):
                     callback(lh)
             except KeyboardInterrupt:
                 break
+            except RuntimeError as e:
+                if 'set_re_cov' in str(e) and 'known' in str(e):
+                    raise RuntimeError("Pass known covariance(s) at init: ``MixedEffectsModel(covariance=t)``") from e
+                raise e
 
             if len(lh) > patience:
                 if pd.Series(lh).diff()[-patience:].abs().max() < tol:
