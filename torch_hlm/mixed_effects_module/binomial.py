@@ -1,4 +1,4 @@
-from typing import Sequence, Optional, Union, Dict
+from typing import Sequence, Optional, Union, Dict, Tuple
 
 import torch
 import numpy as np
@@ -26,11 +26,12 @@ class BinomialReSolver(ReSolver):
             for gf, kwargs in self.static_kwargs_per_gf.items():
                 XtX = kwargs.pop('XtX')
                 pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
-                kwargs['Htild_inv'] = torch.inverse(-XtX - pp)
+                kwargs['Htild_inv'] = .25 * torch.inverse(-XtX - pp)
 
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
         kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
         for gf, kwargs in kwargs_per_gf.items():
+            kwargs['cg'] = len(self.design) == 1
 
             if self._prev_res_per_gf is None:
                 kwargs['prev_res'] = None
@@ -53,9 +54,9 @@ class BinomialReSolver(ReSolver):
     def __call__(self,
                  fe_offset: torch.Tensor,
                  max_iter: int = 200,
-                 tol: float = .01,
+                 reltol: float = .01,
                  **kwargs) -> Dict[str, torch.Tensor]:
-        res_per_gf = super().__call__(fe_offset=fe_offset, max_iter=max_iter, tol=tol, **kwargs)
+        res_per_gf = super().__call__(fe_offset=fe_offset, max_iter=max_iter, reltol=reltol, **kwargs)
         self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
         return res_per_gf
 
@@ -65,7 +66,6 @@ class BinomialReSolver(ReSolver):
             assert self.history
             # this is an iterative solver, each iteration updates the `prev_res`
             kwargs['prev_res'] = self.history[-1][gf]
-            kwargs['slow_start'] = 2
         return kwargs_per_gf
 
     # noinspection PyMethodOverriding
@@ -77,8 +77,8 @@ class BinomialReSolver(ReSolver):
                    prior_precision: torch.Tensor,
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
-                   slow_start: int = 2,
-                   cg: Union[bool, str] = True
+                   cg: Union[bool, str],
+                   slow_start: int = 2
                    ) -> torch.Tensor:
         """
         :param X: N*K model-mat
@@ -87,7 +87,7 @@ class BinomialReSolver(ReSolver):
         :param offset: N vector of offsets for y (e.g. predictions from fixed-effects).
         :param prior_precision: K*K precision matrix
         :param Htild_inv: Approximate hessian, inverted.
-        :param cg: Use conjugate-gradient step? Default is to use, but detach the autograd gradient.
+        :param cg: Use conjugate-gradient step?
         :return: A G*K tensor of REs
         """
         _, num_res = X.shape
@@ -106,8 +106,8 @@ class BinomialReSolver(ReSolver):
         prev_betas_broad = prev_res[group_ids_seq]
         # predictions:
         yhat = ((X * prev_betas_broad).sum(1) + offset)
-        # prob = torch.sigmoid(yhat)
-        prob = 1.0 / (1.0 + (-yhat).exp())
+        prob = torch.sigmoid(yhat)
+        # prob = 1.0 / (1.0 + (-yhat).exp())
 
         # grad:
         grad_els = X * (prob - y).unsqueeze(-1).expand(-1, num_res)
@@ -144,42 +144,15 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
     solver_cls = BinomialReSolver
     default_loss_type = 'h_likelihood'
 
-    def _get_h_log_prob(self,
-                        X: torch.Tensor,
-                        y: torch.Tensor,
-                        group_ids: np.ndarray,
-                        cache: Optional[dict] = None) -> torch.Tensor:
-        """
-        TODO: generalize outside of binomial
-        """
-        if not self.fixed_cov:
-            raise RuntimeError(
-                f"Cannot use `h_likelihood` when optimizing covariance. Need to pass known covariances to "
-                f"``{type(self).__name__}.set_re_cov()``, or need to change ``loss_type``."
-            )
-
-        X, y = validate_tensors(X, y)
-        group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
-
-        cache = cache or {}
-        if cache:
-            solver = cache['solver']
-        else:
-            raise NotImplementedError
-
-        yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
-        res_per_gf = solver(
-            fe_offset=yhat_f,
-            prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
-        )
-        yhat_r = get_yhat_r(design=self.rf_idx, X=X, group_ids=group_ids, res_per_gf=res_per_gf).sum(1)
-
-        predicted = yhat_f + yhat_r
-
-        log_prob_lik = torch.distributions.Binomial(logits=predicted).log_prob(y).sum()
-
-        log_prob_prior = [torch.tensor(0.)]
-        for gf, res in res_per_gf.items():
-            log_prob_prior.append(self.re_distribution(gf).log_prob(res).sum())
-        log_prob_prior = torch.stack(log_prob_prior)
-        return log_prob_lik + log_prob_prior.sum()
+    def predict_distribution_mode(
+            self,
+            X: torch.Tensor,
+            group_ids: Sequence,
+            re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
+            res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
+            **kwargs
+    ) -> torch.distributions.Distribution:
+        if 'validate_args' not in kwargs:
+            kwargs['validate_args'] = False
+        pred = self(X=X, group_ids=group_ids, re_solve_data=re_solve_data, res_per_gf=res_per_gf)
+        return torch.distributions.Binomial(logits=pred, **kwargs)

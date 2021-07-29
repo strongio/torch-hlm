@@ -53,7 +53,7 @@ class MixedEffectsModel(BaseEstimator):
 
         self.module_ = None
         self.optimizer_ = None
-        self.loss_history_ = []  # TODO
+        self.loss_history_ = []
 
     @cached_property
     def all_model_mat_cols(self) -> Sequence:

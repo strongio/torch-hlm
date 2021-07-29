@@ -73,7 +73,7 @@ class LowRankCov(Covariance):
     def __init__(self, rank: int, low_rank: Optional[int] = None):
         super().__init__(rank=rank)
         if low_rank is None:
-            low_rank = int(math.sqrt(self.rank))  # TODO
+            low_rank = int(math.sqrt(self.rank))
         self.lr = torch.nn.Parameter(data=.1 * torch.randn(self.rank, low_rank))
         self.log_std_devs = torch.nn.Parameter(data=.1 * torch.randn(self.rank))
 
@@ -85,5 +85,5 @@ class LowRankCov(Covariance):
             raise RuntimeError(f"{type(self).__name__} unable to set non-diagonal cov")
         with torch.no_grad():
             self.log_std_devs[:] = tens.diag().sqrt().log()
-            # TODO: zero lr?
+            # TODO: zero-out lr?
         # assert torch.isclose(self(), tens, atol=1e-04).all()

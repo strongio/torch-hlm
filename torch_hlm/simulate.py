@@ -20,13 +20,6 @@ def simulate_raneffects(num_groups: int,
     :return: Two dataframes: the first with predictors, group-indicator, and a (noiseless) `y` response; the second
     with the true random-effects values for each group.
     """
-    # generate model-mat
-    assert num_raneffects > 0
-    X = np.random.multivariate_normal(
-        mean=np.zeros(num_raneffects - 1),
-        cov=_random_corr_mat(num_raneffects - 1, eps=np.sqrt(num_raneffects)) / np.sqrt(num_raneffects),
-        size=num_groups * obs_per_group
-    )
 
     # generate random-effects:
     if num_raneffects < 10:
@@ -44,16 +37,28 @@ def simulate_raneffects(num_groups: int,
     df_raneffects = pd.DataFrame(raneffects, columns=[f'x{i}' for i in range(num_raneffects)])
     df_raneffects['group'] = list(range(num_groups))
 
+    # generate model-mat
+    assert num_raneffects > 0
+    if num_raneffects > 1:
+        X = np.random.multivariate_normal(
+            mean=np.zeros(num_raneffects - 1),
+            cov=_random_corr_mat(num_raneffects - 1, eps=np.sqrt(num_raneffects)) / np.sqrt(num_raneffects),
+            size=num_groups * obs_per_group
+        )
+        df = pd.DataFrame(X, columns=[f'x{i}' for i in range(1, num_raneffects)])
+        Xi = np.concatenate([np.ones((len(X), 1)), X], 1)  # intercept
+    else:
+        n = num_groups * obs_per_group
+        df = pd.DataFrame(index=range(n))
+        Xi = np.ones((n, 1))
+
     # broadcast, generate y (without noise)
     group_idx = []
     for group_id in range(num_groups):
         group_idx.extend([group_id] * obs_per_group)
     group_idx = np.asanyarray(group_idx)
-    Xi = np.concatenate([np.ones((len(X), 1)), X], 1)  # intercept
     y_actual = (raneffects[group_idx] * Xi).sum(1)
 
-    # create data-frame
-    df = pd.DataFrame(X, columns=[f'x{i}' for i in range(1, num_raneffects)])
     df['y'] = y_actual
     df['group'] = group_idx
     return df, df_raneffects

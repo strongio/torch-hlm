@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Sequence, Union, Optional, Dict
+from typing import Sequence, Union, Optional, Dict, Tuple
 
 import torch
 import numpy as np
@@ -43,19 +43,20 @@ class GaussianReSolver(ReSolver):
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
         yoff = y - offset
-        Xty_els = X * yoff[:, None]
+        Xty_els = X * yoff.unsqueeze(1)
         Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)  # TODO: sample_weights
 
-        # res = torch.inverse(XtX + prior_precision) @ Xty.unsqueeze(-1)
+        # TODO: if multiple-grouping factors, would it be better to use iterative (e.g. 1/2 newton step) procudure?
+        #    would need to pass `prev_res` as in binomial
         res, _ = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)
 
         return res.squeeze(-1)
 
-    def _check_convergence(self, tol: float) -> bool:
+    def _check_if_converged(self, reltol: float) -> bool:
         if len(self.design) == 1:
             # if only one grouping factor, then solution is closed form, not iterative
             return True
-        return super()._check_convergence(tol=tol)
+        return super()._check_if_converged(reltol=reltol)
 
 
 class GaussianMixedEffectsModule(MixedEffectsModule):
@@ -78,6 +79,19 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             verbose=verbose
         )
         self._residual_std_dev_log = torch.nn.Parameter(.01 * torch.randn(1))
+
+    def predict_distribution_mode(
+            self,
+            X: torch.Tensor,
+            group_ids: Sequence,
+            re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
+            res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
+            **kwargs
+    ) -> torch.distributions.Distribution:
+        if 'validate_args' not in kwargs:
+            kwargs['validate_args'] = False
+        pred = self(X=X, group_ids=group_ids, re_solve_data=re_solve_data, res_per_gf=res_per_gf)
+        return torch.distributions.Normal(loc=pred, scale=self.residual_var ** .5)
 
     @property
     def residual_var(self) -> torch.Tensor:

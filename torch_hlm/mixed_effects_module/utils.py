@@ -64,7 +64,7 @@ def validate_tensors(*args) -> Iterator:
 def validate_group_ids(group_ids: Sequence, num_grouping_factors: int) -> np.ndarray:
     group_ids = np.asanyarray(group_ids)
     if num_grouping_factors > 1:
-        if len(group_ids.shape) != 2 or len(group_ids.shape[1]) != num_grouping_factors:
+        if len(group_ids.shape) != 2 or group_ids.shape[1] != num_grouping_factors:
             raise ValueError(
                 f"There are {num_grouping_factors} grouping-factors, so `group_ids` should be 2d with 2nd "
                 f"dimension of this extent."

@@ -1,4 +1,6 @@
+import functools
 import unittest
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -6,26 +8,109 @@ import pandas as pd
 from parameterized import parameterized
 
 import torch
+from scipy.special import expit
 
 from torch_hlm.mixed_effects_model import MixedEffectsModel
 from torch_hlm.simulate import simulate_raneffects
 
 
 class TestTraining(unittest.TestCase):
-    expected_re_corr = {
-        'binary': (.79, .865),
-        'gaussian': (.90, .94)
-    }
 
     @parameterized.expand([('binary',), ('gaussian',)])
-    @torch.no_grad()
+    def test_training_multiple_gf(self,
+                                  response_type: str = 'binary',
+                                  num_res: Sequence[int] = (0, 0),
+                                  intercept: float = -1.,
+                                  noise: float = 1.0):
+        print("`test_training_multiple_gf()` with config `{}`".
+              format({k: v for k, v in locals().items() if k != 'self'}))
+        torch.manual_seed(43)
+        np.random.seed(43)
+
+        # SIMULATE DATA -----
+        df_train = []
+        df_raneff_true = []
+        for i, num_res_g in enumerate(num_res):
+            df_train_g, df_raneff_true_g = simulate_raneffects(
+                num_groups=30 + 10 * i,
+                obs_per_group=1,
+                num_raneffects=num_res_g + 1
+            )
+            df_train.append(df_train_g.rename(columns={'y': f"g{i + 1}_y", 'group': f'g{i + 1}'}))
+            df_raneff_true.append(df_raneff_true_g.assign(gf=f"g{i + 1}"))
+
+        #
+        df_train = functools.reduce(lambda x, y: x.merge(y, how='cross'), df_train)
+        df_train['y'] = intercept
+        for i in range(len(num_res)):
+            df_train['y'] += df_train.pop(f"g{i + 1}_y")
+
+        #
+        df_raneff_true = pd.concat(df_raneff_true).reset_index(drop=True)
+
+        if response_type == 'binary':
+            df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=1)
+        elif response_type == 'binomial':
+            raise NotImplementedError("TODO")
+        else:
+            df_train['y'] += noise * np.random.randn(df_train.shape[0])
+
+        # FIT MODEL -----
+        covariance = {}
+        for gf, df_raneff_true_g in df_raneff_true.groupby('gf'):
+            covariance[gf] = torch.as_tensor(df_raneff_true_g.drop(columns=['group', 'gf']).cov().values)
+
+        raneff_design = {f"g{i + 1}": [] for i in range(len(num_res))}
+        for gf in list(raneff_design):
+            raneff_design[gf] = df_train.columns[df_train.columns.str.startswith(gf + '_x')].tolist()
+        model = MixedEffectsModel(
+            fixeff_cols=[],
+            response_type='binomial' if response_type.startswith('bin') else 'gaussian',
+            raneff_design=raneff_design,
+            response='y',
+            covariance=covariance
+        )
+        model.fit(df_train, loss_type='h_likelihood')
+
+        # COMPARE TRUE vs. EST -----
+        with torch.no_grad():
+            res_per_g = model.module_.get_res(*model.build_model_mats(df_train))
+            df_raneff_est = []
+            for gf, re_mat in res_per_g.items():
+                df_raneff_est.append(
+                    pd.DataFrame(re_mat.numpy(), columns=[f'x{i}' for i in range(num_res[i] + 1)]).assign(gf=gf)
+                )
+                df_raneff_est[-1]['group'] = np.unique(df_train[gf])
+            df_raneff_est = pd.concat(df_raneff_est).reset_index(drop=True)
+
+        df_compare = pd.concat([df_raneff_est.assign(type='est'), df_raneff_true.assign(type='true')]). \
+            melt(id_vars=['group', 'gf', 'type']). \
+            pivot(index=['group', 'gf', 'variable'], columns='type', values='value'). \
+            reset_index()
+        df_compare.columns.name = None
+        df_corr = df_compare.groupby(['variable', 'gf'])[['true', 'est']].corr().reset_index([0, 1])
+        try:
+            # these are very sensitive to exact config (e.g. num_groups), may want to laxen
+            self.assertGreater(df_corr.loc['true', 'est'].min(), .6 if response_type.startswith('bin') else .8)
+            self.assertGreater(df_corr.loc['true', 'est'].mean(), .7 if response_type.startswith('bin') else .9)
+        except AssertionError:
+            print(df_corr)
+            raise
+
+        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .25)
+        wt = model.module_.fixed_effects_nn.weight.squeeze()
+        if len(wt):
+            self.assertLess(abs(wt[0] - .5), .1)
+            self.assertLess(wt[1:].abs().max(), .1)
+
+    @parameterized.expand([('binary',), ('gaussian',)])
     def test_training_single_gf(self,
                                 response_type: str,
                                 num_groups: int = 500,
                                 num_res: int = 2,
                                 num_obs_per_group: int = 100,
                                 intercept: float = -1.,
-                                noise: float = 1.1):
+                                noise: float = 1.0):
         print("`test_training_single_gf()` with config `{}`".format({k: v for k, v in locals().items() if k != 'self'}))
         torch.manual_seed(43)
         np.random.seed(43)
@@ -37,16 +122,15 @@ class TestTraining(unittest.TestCase):
             num_raneffects=num_res + 1,
             # std_multi=[0.2] + [0.1] * NUM_RES
         )
-        df_train['y'] += (
-                intercept +
-                .5 * df_train['x1'] +
-                noise * np.random.randn(len(df_train.index))
-        )
+        assert num_res > 0  # we assume x1 exists in this sim
+        df_train['y'] += (intercept + .5 * df_train['x1'])
 
         if response_type == 'binary':
-            df_train['y'] = (df_train['y'] > 0).astype('int')
+            df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=1)
         elif response_type == 'binomial':
             raise NotImplementedError("TODO")
+        else:
+            df_train['y'] += noise * np.random.randn(df_train.shape[0])
 
         df_train['time'] = df_train.groupby('group').cumcount()
         df_train = df_train.merge(
@@ -88,11 +172,15 @@ class TestTraining(unittest.TestCase):
         df_compare.columns.name = None
 
         df_corr = df_compare.groupby('variable')[['true', 'est']].corr().reset_index(0)
-        lower, mean = self.expected_re_corr[response_type]
         try:
-            self.assertGreater(df_corr.loc['true', 'est'].min(), lower)
-            self.assertGreater(df_corr.loc['true', 'est'].mean(), mean)
+            # these are very sensitive to exact config (e.g. num_groups), may want to laxen
+            self.assertGreater(df_corr.loc['true', 'est'].min(), .5 if response_type.startswith('bin') else .6)
+            self.assertGreater(df_corr.loc['true', 'est'].mean(), .6 if response_type.startswith('bin') else .8)
         except AssertionError:
             print(df_corr)
             raise
-        # TODO: fixed-effects
+
+        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .1)
+        wt = model.module_.fixed_effects_nn.weight.squeeze()
+        self.assertLess(abs(wt[0] - .5), .1)
+        self.assertLess(wt[1:].abs().max(), .1)

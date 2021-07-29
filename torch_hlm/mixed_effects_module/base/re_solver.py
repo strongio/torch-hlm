@@ -1,4 +1,4 @@
-from typing import Optional, Sequence, Dict
+from typing import Optional, Sequence, Dict, Iterable, Tuple
 from warnings import warn
 
 import torch
@@ -48,8 +48,8 @@ class ReSolver:
 
     def __call__(self,
                  fe_offset: torch.Tensor,
-                 max_iter: int = 200,
-                 tol: float = .01,
+                 max_iter: Optional[int] = None,
+                 reltol: float = .01,
                  prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
         """
@@ -57,20 +57,24 @@ class ReSolver:
 
         :param fe_offset: The offset that comes from the fixed-effects.
         :param max_iter: The maximum number of iterations.
-        :param tol: Tolerance for checking convergence.
+        :param reltol: Relative (change/prev_val) tolerance for checking convergence.
         :param prior_precisions: A dictionary with the precision matrices for each grouping factor.
         :param kwargs: Other keyword arguments to `solve_step`
         :return: A dictionary with random-effects for each grouping-factor
         """
+        if max_iter is None:
+            max_iter = 200 * len(self.design)
         assert max_iter > 0
         kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
 
         self.history = []
         while True:
             if len(self.history) >= max_iter:
-                # TODO: mask gradient for unconverged groups?
                 if max_iter:
-                    warn("TODO")
+                    for gf, changes in self._check_convergence():
+                        unconverged = (changes > reltol).sum()
+                        if unconverged:
+                            warn(f"There are {unconverged:,} unconverged for {gf}, max-relchange {changes.max()}")
                 break
 
             # take a step towards solving the random-effects:
@@ -79,15 +83,14 @@ class ReSolver:
                 self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf], **kwargs)
 
             # check convergence:
-            if self._check_convergence(tol=tol):
+            if self._check_if_converged(reltol):
+                break
                 # TODO: verbose
                 # TODO: patience
                 # TODO: if only one grouping factor, drop converged groups
-                break
 
             # recompute offset, etc:
             kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset)
-
         return self.history[-1]
 
     def solve_step(self,
@@ -149,16 +152,22 @@ class ReSolver:
 
         return out
 
-    def _check_convergence(self, tol: float) -> bool:
+    def _check_if_converged(self, reltol: float) -> bool:
         if len(self.history) < 2:
             return False
         converged = True
+        for gf, changes in self._check_convergence():
+            if (changes > reltol).any():
+                converged = False
+                break
+        return converged
+
+    def _check_convergence(self) -> Iterable[Tuple[str, torch.Tensor]]:
+        assert len(self.history) >= 2
         with torch.no_grad():
             for gf in self.design.keys():
                 current_res = self.history[-1][gf]
                 prev_res = self.history[-2][gf]
                 changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
-                if (changes > tol).any():
-                    converged = False
-                    break
-        return converged
+                # print(gf, changes.max())
+                yield gf, changes

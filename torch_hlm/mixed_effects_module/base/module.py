@@ -64,9 +64,12 @@ class MixedEffectsModule(torch.nn.Module):
             num_fixed_features = len(fixeff_features)
             self.ff_idx = list(fixeff_features)
         if fixed_effects_nn is None:
-            fixed_effects_nn = torch.nn.Linear(num_fixed_features, 1)
-            with torch.no_grad():
-                fixed_effects_nn.weight[:] = .01 * torch.randn(num_fixed_features)
+            if num_fixed_features:
+                fixed_effects_nn = torch.nn.Linear(num_fixed_features, 1)
+                with torch.no_grad():
+                    fixed_effects_nn.weight[:] = .01 * torch.randn(num_fixed_features)
+            else:
+                fixed_effects_nn = _NoWeightModule(1)
         self.fixed_effects_nn = fixed_effects_nn
 
         # random effects:
@@ -210,6 +213,30 @@ class MixedEffectsModule(torch.nn.Module):
         # combine:
         return yhat_f + yhat_r
 
+    def predict_distribution_mode(
+            self,
+            X: torch.Tensor,
+            group_ids: Sequence,
+            re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
+            res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
+            **kwargs
+    ) -> torch.distributions.Distribution:
+        """
+        Predict the posterior mode as a ``torch.distributions.Distribution``.
+
+        :param X: Model-matrix
+        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
+        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+        :param re_solve_data: A tuple of (X,y,group_ids) that will be used for establishing the random-effects.
+        :param res_per_gf: Instead of passing `re_solve_data` and having the module solve the random-effects per
+        group, can alternatively pass these random-effects. This should be a dictionary whose keys are grouping-factors
+        and whose values are tensors. Each tensor's row corresponds to the groups for that grouping factor, in sorted
+        order. If there is only one grouping factor, can pass a tensor instead of a dict.
+        :param kwargs: Other arguments to pass to the distribution's init.
+        :return: A ``torch.distributions.Distribution``
+        """
+        raise NotImplementedError
+
     def get_res(self,
                 X: torch.Tensor,
                 y: torch.Tensor,
@@ -281,6 +308,8 @@ class MixedEffectsModule(torch.nn.Module):
             optimizer.zero_grad()
             # TODO: currently no way to pass kwargs to solver.__call__
             loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache)
+            if torch.isnan(loss):
+                raise RuntimeError("Encountered `nan` loss in training.")
             loss.backward()
             if progress:
                 progress.update()
@@ -334,14 +363,46 @@ class MixedEffectsModule(torch.nn.Module):
         random effects for observations 1-K, then compute the loss on K+1. We do this for all possible Ks.
         :return:
         """
-        raise RuntimeError("TODO")
+        raise NotImplementedError("TODO")
 
     def _get_h_log_prob(self,
                         X: torch.Tensor,
                         y: torch.Tensor,
                         group_ids: np.ndarray,
                         cache: Optional[dict] = None) -> torch.Tensor:
-        raise NotImplementedError
+        """
+        If the re-cov is known and fixed, we can optimized fixed effects using likelihood of the posterior modes.
+
+        :param X: A 2D model-matrix Tensor
+        :param y: A 1D target/response Tensor.
+        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
+        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+        :param cache: Dictionary of cached objects that don't need to be re-created each call (e.g. ``ReSolver``)
+        :return: The log-prob for the data.
+        """
+        if not self.fixed_cov:
+            raise RuntimeError(
+                f"Cannot use `h_likelihood` when optimizing covariance. Need to pass known covariances to "
+                f"``{type(self).__name__}.set_re_cov()``, or need to change ``loss_type``."
+            )
+
+        X, y = validate_tensors(X, y)
+        group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+
+        cache = cache or {}
+        if cache:
+            solver = cache['solver']
+        else:
+            raise NotImplementedError
+
+        yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
+        res_per_gf = solver(
+            fe_offset=yhat_f,
+            prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
+        )
+        dist = self.predict_distribution_mode(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+        log_prob_lik = dist.log_prob(y).sum()
+        return log_prob_lik
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:
         """
@@ -360,3 +421,13 @@ class MixedEffectsModule(torch.nn.Module):
         if not penalties:
             return 0.
         return -torch.cat(penalties).sum()
+
+
+class _NoWeightModule(torch.nn.Module):
+    def __init__(self, out_features: int = 1):
+        super().__init__()
+        self.bias = torch.nn.Parameter(torch.randn(out_features))
+        self.weight = torch.empty((0, out_features))
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.bias.expand(len(input), -1)
