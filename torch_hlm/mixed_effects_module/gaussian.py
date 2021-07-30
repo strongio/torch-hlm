@@ -1,5 +1,6 @@
 from collections import defaultdict
 from typing import Sequence, Union, Optional, Dict, Tuple
+from warnings import warn
 
 import torch
 import numpy as np
@@ -155,15 +156,19 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                   group_ids: np.ndarray,
                   cache: Optional[dict] = None,
                   loss_type: Optional[str] = None,
-                  skip_res: bool = False):
+                  skip_res: bool = False,
+                  **kwargs):
         if loss_type == 'closed_form':
-            return -self._get_gaussian_log_prob(X=X, y=y, group_ids=group_ids)
-        return super()._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type)
+            return -self._get_gaussian_log_prob(X=X, y=y, group_ids=group_ids, **kwargs)
+        return super()._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, **kwargs)
 
     def _get_gaussian_log_prob(self,
                                X: torch.Tensor,
                                y: torch.Tensor,
-                               group_ids: np.ndarray) -> torch.Tensor:
+                               group_ids: np.ndarray,
+                               **kwargs) -> torch.Tensor:
+        if kwargs:
+            warn(f"Ignoring {set(kwargs)}")
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))

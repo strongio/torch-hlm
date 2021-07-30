@@ -4,6 +4,7 @@ from warnings import warn
 
 import torch
 import numpy as np
+from sklearn.model_selection import StratifiedKFold
 
 from tqdm.auto import tqdm
 
@@ -105,10 +106,6 @@ class MixedEffectsModule(torch.nn.Module):
     @property
     def grouping_factors(self) -> Sequence:
         return list(self.rf_idx.keys())
-
-
-    def _is_cov_param(self, param: torch.Tensor) -> bool:
-        return any(param is cov_param for cov_param in self.covariance.parameters())
 
     def _get_prior_precisions(self, detach: bool) -> Dict[str, torch.Tensor]:
         out = {}
@@ -280,6 +277,9 @@ class MixedEffectsModule(torch.nn.Module):
                 break
         return fixed_cov
 
+    def _is_cov_param(self, param: torch.Tensor) -> bool:
+        return any(param is cov_param for cov_param in self.covariance.parameters())
+
     # fitting --------
     def fit_loop(self,
                  X: torch.Tensor,
@@ -300,23 +300,15 @@ class MixedEffectsModule(torch.nn.Module):
         else:
             progress = tqdm(total=1)
 
-        # initialize the solver:
-        cache = {'solver': self.solver_cls(
-            X=X,
-            y=y,
-            group_ids=group_ids,
-            design=self.rf_idx,
-            prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None,
-            verbose=self.verbose > 1,
-            **kwargs
-        )}
+        # solver will go here:
+        cache = {}
 
         # create the closure which returns the loss
         epoch = 0
 
         def closure():
             optimizer.zero_grad()
-            loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache)
+            loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache, **kwargs)
             if torch.isnan(loss):
                 raise RuntimeError("Encountered `nan` loss in training.")
             loss.backward()
@@ -339,12 +331,13 @@ class MixedEffectsModule(torch.nn.Module):
                  group_ids: np.ndarray,
                  cache: Optional[dict] = None,
                  loss_type: Optional[str] = None,
-                 reduce: bool = True) -> torch.Tensor:
+                 reduce: bool = True,
+                 **kwargs) -> torch.Tensor:
 
         if loss_type is None:
             loss_type = self.default_loss_type
 
-        loss = self._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type)
+        loss = self._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, **kwargs)
 
         loss = loss + self._get_re_penalty()
 
@@ -357,11 +350,12 @@ class MixedEffectsModule(torch.nn.Module):
                   y: torch.Tensor,
                   group_ids: np.ndarray,
                   cache: Optional[dict] = None,
-                  loss_type: Optional[str] = None):
+                  loss_type: Optional[str] = None,
+                  **kwargs):
         if loss_type.startswith('cv'):
-            return self._get_cv_loss(X=X, y=y, group_ids=group_ids, cache=cache)
+            return self._get_cv_loss(X=X, y=y, group_ids=group_ids, cache=cache, **kwargs)
         elif loss_type.startswith('iid'):
-            return self._get_iid_loss(X=X, y=y, group_ids=group_ids, cache=cache)
+            return self._get_iid_loss(X=X, y=y, group_ids=group_ids, cache=cache, **kwargs)
         else:
             raise NotImplementedError(f"{type(self).__name__} does not implement type={loss_type}")
 
@@ -370,7 +364,8 @@ class MixedEffectsModule(torch.nn.Module):
                      y: torch.Tensor,
                      group_ids: np.ndarray,
                      cache: Optional[dict] = None,
-                     cv: Optional[Iterator] = None):
+                     cv: Optional[Iterator] = None,
+                     **kwargs):
         """
         XXX
         :return:
@@ -391,7 +386,9 @@ class MixedEffectsModule(torch.nn.Module):
                     y=y[train_idx],
                     group_ids=group_ids[train_idx],
                     design=self.rf_idx,
-                    prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None
+                    prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None,
+                    verbose=self.verbose > 1,
+                    **kwargs
                 )
                 cache[f'fold{i + 1}'] = (solver, test_idx)
 
@@ -414,7 +411,8 @@ class MixedEffectsModule(torch.nn.Module):
                       X: torch.Tensor,
                       y: torch.Tensor,
                       group_ids: np.ndarray,
-                      cache: Optional[dict] = None) -> torch.Tensor:
+                      cache: Optional[dict] = None,
+                      **kwargs) -> torch.Tensor:
         """
         If the re-cov is known and fixed, we can optimized fixed effects using likelihood of the posterior modes.
 
@@ -435,7 +433,7 @@ class MixedEffectsModule(torch.nn.Module):
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 
         cache = cache or {}
-        if cache:
+        if 'solver' in cache:
             solver = cache['solver']
         else:
             solver = self.solver_cls(
@@ -445,6 +443,7 @@ class MixedEffectsModule(torch.nn.Module):
                 design=self.rf_idx,
                 prior_precisions=self._get_prior_precisions(detach=True),
                 verbose=self.verbose > 1,
+                **kwargs
             )
 
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
