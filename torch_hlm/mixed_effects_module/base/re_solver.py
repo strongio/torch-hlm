@@ -21,6 +21,7 @@ class ReSolver:
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
     _prev_res_per_gf = None
+    _prev_re_offsets = None
 
     def __init__(self,
                  X: torch.Tensor,
@@ -38,7 +39,7 @@ class ReSolver:
         self.verbose = verbose
 
         if slow_start is None:
-            slow_start = len(self.design) - 1
+            slow_start = 2 * (len(self.design) - 1)
         self.slow_start = slow_start
 
         # establish static kwargs:

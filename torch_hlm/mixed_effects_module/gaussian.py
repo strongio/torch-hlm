@@ -41,20 +41,6 @@ class GaussianReSolver(ReSolver):
                 pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
                 kwargs['XtX_inv'] = torch.inverse(XtX + pp)
 
-    def __call__(self,
-                 fe_offset: torch.Tensor,
-                 max_iter: Optional[int] = None,
-                 reltol: float = .01,
-                 prior_precisions: Optional[dict] = None,
-                 **kwargs) -> Dict[str, torch.Tensor]:
-        return super(GaussianReSolver, self).__call__(
-            fe_offset=fe_offset,
-            max_iter=max_iter,
-            reltol=reltol,
-            prior_precisions=prior_precisions,
-            **kwargs
-        )
-
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
         kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
         for gf, kwargs in kwargs_per_gf.items():
@@ -171,13 +157,13 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                   loss_type: Optional[str] = None,
                   skip_res: bool = False):
         if loss_type == 'closed_form':
-            return -self._get_log_prob(X=X, y=y, group_ids=group_ids)
+            return -self._get_gaussian_log_prob(X=X, y=y, group_ids=group_ids)
         return super()._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type)
 
-    def _get_log_prob(self,
-                      X: torch.Tensor,
-                      y: torch.Tensor,
-                      group_ids: np.ndarray) -> torch.Tensor:
+    def _get_gaussian_log_prob(self,
+                               X: torch.Tensor,
+                               y: torch.Tensor,
+                               group_ids: np.ndarray) -> torch.Tensor:
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))

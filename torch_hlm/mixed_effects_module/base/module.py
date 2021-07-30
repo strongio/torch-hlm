@@ -340,10 +340,14 @@ class MixedEffectsModule(torch.nn.Module):
                  cache: Optional[dict] = None,
                  loss_type: Optional[str] = None,
                  reduce: bool = True) -> torch.Tensor:
+
         if loss_type is None:
             loss_type = self.default_loss_type
+
         loss = self._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type)
+
         loss = loss + self._get_re_penalty()
+
         if reduce:
             loss = loss / len(X)
         return loss
@@ -354,30 +358,63 @@ class MixedEffectsModule(torch.nn.Module):
                   group_ids: np.ndarray,
                   cache: Optional[dict] = None,
                   loss_type: Optional[str] = None):
-        if loss_type.startswith('1step'):
-            return self._get_1step_loss(X=X, y=y, group_ids=group_ids, cache=cache)
-        elif loss_type == 'h_likelihood':
-            return -self._get_h_log_prob(X=X, y=y, group_ids=group_ids, cache=cache)
+        if loss_type.startswith('cv'):
+            return self._get_cv_loss(X=X, y=y, group_ids=group_ids, cache=cache)
+        elif loss_type.startswith('iid'):
+            return self._get_iid_loss(X=X, y=y, group_ids=group_ids, cache=cache)
         else:
             raise NotImplementedError(f"{type(self).__name__} does not implement type={loss_type}")
 
-    def _get_1step_loss(self,
-                        X: torch.Tensor,
-                        y: torch.Tensor,
-                        group_ids: np.ndarray,
-                        cache: Optional[dict] = None):
+    def _get_cv_loss(self,
+                     X: torch.Tensor,
+                     y: torch.Tensor,
+                     group_ids: np.ndarray,
+                     cache: Optional[dict] = None,
+                     cv: Optional[Iterator] = None):
         """
-        Compute a loss that is comparable to 1-step ahead error in forecasting: within each group, we calcluate the
-        random effects for observations 1-K, then compute the loss on K+1. We do this for all possible Ks.
+        XXX
         :return:
         """
-        raise NotImplementedError("TODO")
+        cache = cache or {}
 
-    def _get_h_log_prob(self,
-                        X: torch.Tensor,
-                        y: torch.Tensor,
-                        group_ids: np.ndarray,
-                        cache: Optional[dict] = None) -> torch.Tensor:
+        if cv is None:
+            cv = 10
+        if isinstance(cv, int):
+            cv = StratifiedKFold(n_splits=cv)  # TODO: random-state?
+
+        have_solvers = [f'fold{i + 1}' in cache for i in range(cv.n_splits)]
+        if not all(have_solvers):
+            assert not any(have_solvers)  # that would be weird
+            for i, (train_idx, test_idx) in enumerate(cv.split(X=X, y=group_ids[:, 0])):  # TODO: select grouping factor
+                solver = self.solver_cls(
+                    X=X[train_idx],
+                    y=y[train_idx],
+                    group_ids=group_ids[train_idx],
+                    design=self.rf_idx,
+                    prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None
+                )
+                cache[f'fold{i + 1}'] = (solver, test_idx)
+
+        log_probs = []
+        for k, v in cache.items():
+            if not k.startswith('fold'):
+                continue
+            solver, test_idx = v
+            res_per_gf = solver(
+                fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
+                prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
+            )
+            for i in range(solver.group_ids.shape[-1]):
+                assert np.array_equal(np.unique(solver.group_ids[:, i]), np.unique(group_ids[test_idx, i]))
+            dist = self.predict_distribution_mode(X=X[test_idx], group_ids=group_ids[test_idx], res_per_gf=res_per_gf)
+            log_probs.append(dist.log_prob(y[test_idx]).sum())
+        return -torch.sum(torch.stack(log_probs))
+
+    def _get_iid_loss(self,
+                      X: torch.Tensor,
+                      y: torch.Tensor,
+                      group_ids: np.ndarray,
+                      cache: Optional[dict] = None) -> torch.Tensor:
         """
         If the re-cov is known and fixed, we can optimized fixed effects using likelihood of the posterior modes.
 
@@ -390,7 +427,7 @@ class MixedEffectsModule(torch.nn.Module):
         """
         if not self.fixed_cov:
             raise RuntimeError(
-                f"Cannot use `h_likelihood` when optimizing covariance. Need to pass known covariances to "
+                f"Cannot use `iid_loss` when optimizing covariance. Need to pass known covariances to "
                 f"``{type(self).__name__}.set_re_cov()``, or need to change ``loss_type``."
             )
 
@@ -401,16 +438,20 @@ class MixedEffectsModule(torch.nn.Module):
         if cache:
             solver = cache['solver']
         else:
-            raise NotImplementedError
+            solver = self.solver_cls(
+                X=X,
+                y=y,
+                group_ids=group_ids,
+                design=self.rf_idx,
+                prior_precisions=self._get_prior_precisions(detach=True),
+                verbose=self.verbose > 1,
+            )
 
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
-        res_per_gf = solver(
-            fe_offset=yhat_f,
-            prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
-        )
+        res_per_gf = solver(fe_offset=yhat_f)
         dist = self.predict_distribution_mode(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
         log_prob_lik = dist.log_prob(y).sum()
-        return log_prob_lik
+        return -log_prob_lik
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:
         """

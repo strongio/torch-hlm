@@ -137,7 +137,7 @@ class BinomialReSolver(ReSolver):
 
 class BinomialMixedEffectsModule(MixedEffectsModule):
     solver_cls = BinomialReSolver
-    default_loss_type = 'h_likelihood'
+    default_loss_type = 'iid'  # TODO
 
     def predict_distribution_mode(
             self,

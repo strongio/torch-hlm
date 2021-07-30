@@ -104,7 +104,7 @@ class MixedEffectsModel(BaseEstimator):
                     group_ids: Sequence,
                     callbacks: Collection[Callable] = (),
                     max_num_epochs: Optional[int] = 1,
-                    early_stopping: Tuple[float, int] = (.001, 2),
+                    reltol: float = .01,
                     loss_type: Optional[str] = None) -> 'MixedEffectsModel':
         """
         (Partially) fit the underlying ``MixedEffectsModule``.
@@ -117,8 +117,6 @@ class MixedEffectsModel(BaseEstimator):
         :param max_num_epochs: The maximum number of epochs to fit. For similarity to other sklearn estimator's
          ``partial_fit()`` behavior, this default to 1, so that a single call to ``partial_fit()`` performs a single
          epoch.
-        :param early_stopping: If ``num_epochs > 1``, then early-stopping critierion can be supplied: a tuple with
-         ``(tolerance, patience)`` (defaults to loss-diff < .001 for 2 iters).
         :param loss_type: TODO
         :return: This instance
         """
@@ -131,7 +129,6 @@ class MixedEffectsModel(BaseEstimator):
         if max_num_epochs is None:
             max_num_epochs = float('inf')
         assert max_num_epochs > 0
-        tol, patience = early_stopping
 
         X = torch.as_tensor(X, **get_to_kwargs(self.module_))
         y = torch.as_tensor(y, **get_to_kwargs(self.module_))
@@ -148,6 +145,8 @@ class MixedEffectsModel(BaseEstimator):
             self.loss_history_ = []
         self.loss_history_.append([])  # a separate loss-history for each call to `fit()`
         lh = self.loss_history_[-1]
+
+        last_params = None
         epoch = 0
         while True:
             try:
@@ -162,16 +161,26 @@ class MixedEffectsModel(BaseEstimator):
                     raise RuntimeError("Pass known covariance(s) at init: ``MixedEffectsModel(covariance=t)``") from e
                 raise e
 
-            if len(lh) > patience:
-                if pd.Series(lh).diff()[-patience:].abs().max() < tol:
-                    print(f"Loss-diff < {tol} for {patience} iters in a row, stopping.")
-                    break
+            converged, last_params = self._check_convergence(reltol, last_params)
+            if converged:
+                print("Reached convergence")
+                break
             epoch += 1
             if epoch >= max_num_epochs:
                 if max_num_epochs > 1:
                     print("Reached `max_num_epochs`, stopping.")
                 break
         return self
+
+    @torch.no_grad()
+    def _check_convergence(self, reltol: float, old: Optional[torch.Tensor]) -> Tuple[bool, torch.Tensor]:
+        new = torch.cat([param.view(-1) for param in self.module_.parameters()]).clone()
+        if old is None:
+            converged = False
+        else:
+            changes = (new - old).abs() / old.abs()
+            converged = (changes <= reltol).all()
+        return converged, new
 
     def build_model_mats(self,
                          df: pd.DataFrame,
