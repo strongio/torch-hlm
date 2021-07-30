@@ -16,7 +16,7 @@ from torch_hlm.simulate import simulate_raneffects
 
 class TestTraining(unittest.TestCase):
 
-    @parameterized.expand([('gaussian', [0, 0]), ('binary', [0, 0, 0])])
+    @parameterized.expand([('gaussian', [0, 0, 0]), ('binary', [0, 0, 0])])
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
@@ -68,7 +68,8 @@ class TestTraining(unittest.TestCase):
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design=raneff_design,
             response='y',
-            covariance=covariance
+            covariance=covariance,
+           # module_kwargs={'verbose': 2}
         )
         model.fit(df_train, loss_type='h_likelihood')
 

@@ -15,6 +15,21 @@ from torch_hlm.low_rank import LowRankMultivariateNormal
 
 class GaussianReSolver(ReSolver):
 
+    def __call__(self,
+                 fe_offset: torch.Tensor,
+                 max_iter: Optional[int] = None,
+                 reltol: float = .01,
+                 prior_precisions: Optional[dict] = None,
+                 **kwargs) -> Dict[str, torch.Tensor]:
+        # TODO: option for closed form w/multiple grouping factors, instead of iterative
+        return super(GaussianReSolver, self).__call__(
+            fe_offset=fe_offset,
+            max_iter=max_iter,
+            reltol=reltol,
+            prior_precisions=prior_precisions,
+            **kwargs
+        )
+
     # noinspection PyMethodOverriding
     def solve_step(self,
                    X: torch.Tensor,
@@ -48,14 +63,14 @@ class GaussianReSolver(ReSolver):
             offset = offset + (prev_res[group_ids_seq] * X).sum(1)
 
         yoff = y - offset
-        Xty_els = X * yoff.unsqueeze(1)
-        Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)  # TODO: sample_weights
+        Xty_els = X * yoff.unsqueeze(1)  # TODO: sample_weights
+        Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
 
-        # # TODO: if multiple-grouping factors, would it be better to use iterative (e.g. 1/2 newton step) procudure?
-        # XtX = XtX / len(X)
-        # Xty = Xty / len(X)
+        iter_ = len(self.history) + 1
+        m = 1 - (iter_ / (float(self.slow_start) + iter_))
+        extra_penalty = (m ** 2) * num_obs * torch.eye(num_res)
 
-        res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
+        res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision + extra_penalty)[0].squeeze(-1)
 
         if prev_res is not None:
             res = prev_res + res
@@ -63,6 +78,7 @@ class GaussianReSolver(ReSolver):
 
     def _check_if_converged(self, reltol: float) -> bool:
         if len(self.design) == 1:
+            assert not self.slow_start
             # if only one grouping factor, then solution is closed form, not iterative
             return True
         return super()._check_if_converged(reltol=reltol)

@@ -85,6 +85,7 @@ class MixedEffectsModule(torch.nn.Module):
         self.covariance = torch.nn.ModuleDict()
         for gf, idx in self.rf_idx.items():
             self.covariance[gf] = Covariance.from_name(covariance, rank=len(idx) + 1)
+        print(self.covariance.state_dict())
 
         if not isinstance(re_scale_penalty, dict):
             re_scale_penalty = {gf: float(re_scale_penalty) for gf in self.grouping_factors}
@@ -279,7 +280,8 @@ class MixedEffectsModule(torch.nn.Module):
                  y: torch.Tensor,
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
-                 loss_type: Optional[str] = None) -> Iterator[float]:
+                 loss_type: Optional[str] = None,
+                 **kwargs) -> Iterator[float]:
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, len(self.grouping_factors))
@@ -298,15 +300,14 @@ class MixedEffectsModule(torch.nn.Module):
             y=y,
             group_ids=group_ids,
             design=self.rf_idx,
-            prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None
+            prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None,
+            verbose=self.verbose > 1,
+            **kwargs
         )}
-
-        # TODO self.verbose>1 to solver
 
         # create the closure which returns the loss
         def closure():
             optimizer.zero_grad()
-            # TODO: currently no way to pass kwargs to solver.__call__
             loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache)
             if torch.isnan(loss):
                 raise RuntimeError("Encountered `nan` loss in training.")

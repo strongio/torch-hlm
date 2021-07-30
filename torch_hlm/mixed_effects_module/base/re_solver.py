@@ -1,3 +1,4 @@
+from random import shuffle
 from typing import Optional, Sequence, Dict, Iterable, Tuple
 from warnings import warn
 
@@ -19,18 +20,26 @@ class ReSolver:
     passed here if this solver is not being used in a context where the precision matrices are optimized. If the
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
+    _prev_res_per_gf = None
 
     def __init__(self,
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
                  design: dict,
-                 prior_precisions: Optional[dict] = None):
+                 prior_precisions: Optional[dict] = None,
+                 slow_start: Optional[float] = None,
+                 verbose: bool = False):
 
         self.X, self.y = validate_tensors(X, y)
         self.group_ids = validate_group_ids(group_ids, num_grouping_factors=len(design))
         self.design = design
         self.prior_precisions = prior_precisions
+        self.verbose = verbose
+
+        if slow_start is None:
+            slow_start = len(self.design) - 1
+        self.slow_start = slow_start
 
         # establish static kwargs:
         self.static_kwargs_per_gf = {}
@@ -79,19 +88,28 @@ class ReSolver:
 
             # take a step towards solving the random-effects:
             self.history.append({})
-            for gf in self.design.keys():
+            for gf in self._shuffled_gfs():
                 self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf], **kwargs)
+            # print(self.history[-1])
 
             # check convergence:
             if self._check_if_converged(reltol):
                 break
-                # TODO: verbose
-                # TODO: patience
                 # TODO: if only one grouping factor, drop converged groups
 
             # recompute offset, etc:
             kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset)
-        return self.history[-1]
+
+        res_per_gf = self.history[-1]
+        self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
+
+        # print(len(self.history))
+        return res_per_gf
+
+    def _shuffled_gfs(self) -> Sequence[str]:
+        gfs = list(self.design.keys())
+        shuffle(gfs)
+        return gfs
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -99,6 +117,7 @@ class ReSolver:
                    offset: torch.Tensor,
                    group_ids: Sequence,
                    prior_precision: torch.Tensor,
+                   prev_res: Optional[torch.Tensor],
                    **kwargs) -> torch.Tensor:
         """
         Update random-effects. For some solvers this might not be iterative given a single grouping factor
@@ -123,9 +142,17 @@ class ReSolver:
 
         kwargs_per_gf = {}
         for gf in self.design.keys():
-            kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
-            kwargs_per_gf[gf]['offset'] = fe_offset.clone()
-            kwargs_per_gf[gf]['prior_precision'] = prior_precisions[gf]
+            kwargs = kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
+            kwargs['offset'] = fe_offset
+            kwargs['prior_precision'] = prior_precisions[gf]
+
+            if self._prev_res_per_gf is None:
+                kwargs['prev_res'] = None
+            else:
+                # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
+                # call it on each optimizer step. we re-use the solutions from the last step as a warm start for
+                # *within* this iterative solver
+                kwargs['prev_res'] = self._prev_res_per_gf[gf]
         return kwargs_per_gf
 
     def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor) -> Optional[dict]:
@@ -150,16 +177,27 @@ class ReSolver:
                     out[gf1]['offset'].append(yhat_r[:, i])
                 out[gf1]['offset'] = torch.sum(torch.stack(out[gf1]['offset']), 0)
 
+                assert self.history
+
+                # this is an iterative solver, each iteration updates the `prev_res`
+                out[gf1]['prev_res'] = self.history[-1][gf1]
+
         return out
 
     def _check_if_converged(self, reltol: float) -> bool:
         if len(self.history) < 2:
+            if self.verbose:
+                print(f"{type(self).__name__} Iter {len(self.history)}: relchange --")
             return False
         converged = True
         for gf, changes in self._check_convergence():
+            # TODO: patience
             if (changes > reltol).any():
                 converged = False
-                break
+                if not self.verbose:
+                    break
+            if self.verbose:
+                print(f"{type(self).__name__} - Iter {len(self.history)} - Gf {gf} - Relchange {changes.max()}")
         return converged
 
     def _check_convergence(self) -> Iterable[Tuple[str, torch.Tensor]]:
@@ -169,5 +207,4 @@ class ReSolver:
                 current_res = self.history[-1][gf]
                 prev_res = self.history[-2][gf]
                 changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
-                # print(gf, changes.max())
                 yield gf, changes

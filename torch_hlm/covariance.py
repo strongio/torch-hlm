@@ -11,7 +11,7 @@ from typing import Optional
 
 import torch
 
-from torch_hlm.mixed_effects_module.utils import log_chol_to_chol
+from torch_hlm.mixed_effects_module.utils import log_chol_to_chol, get_to_kwargs
 
 
 class Covariance(torch.nn.Module):
@@ -51,12 +51,14 @@ class LogCholeskyCov(Covariance):
         L = log_chol_to_chol(log_diag=self.cholesky_log_diag, off_diag=self.cholesky_off_diag)
         return L @ L.t()
 
-    def set(self, tens: torch.Tensor):
+    def set(self, tens: torch.Tensor) -> 'LogCholeskyCov':
+        tens = tens.to(**get_to_kwargs(self))
         L = torch.cholesky(tens)
         with torch.no_grad():
             self.cholesky_log_diag[:] = L.diag().log()
             self.cholesky_off_diag[:] = L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
         assert torch.isclose(self(), tens, atol=1e-04).all()
+        return self
 
 
 class LowRankCov(Covariance):
@@ -80,10 +82,5 @@ class LowRankCov(Covariance):
     def forward(self) -> torch.Tensor:
         return self.lr @ self.lr.t() + torch.diag_embed(self.log_std_devs.exp() ** 2)
 
-    def set(self, tens: torch.Tensor):
-        if not torch.allclose(tens, torch.eye(len(tens)) * tens):
-            raise RuntimeError(f"{type(self).__name__} unable to set non-diagonal cov")
-        with torch.no_grad():
-            self.log_std_devs[:] = tens.diag().sqrt().log()
-            # TODO: zero-out lr?
-        # assert torch.isclose(self(), tens, atol=1e-04).all()
+    def set(self, tens: torch.Tensor) -> 'LowRankCov':
+        raise NotImplementedError
