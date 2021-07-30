@@ -16,15 +16,15 @@ from torch_hlm.simulate import simulate_raneffects
 
 class TestTraining(unittest.TestCase):
 
-    @parameterized.expand([('binary', [0, 0])])
+    @parameterized.expand([('gaussian', [0, 0]), ('binary', [0, 0])])
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
                                   intercept: float = -1.,
                                   noise: float = 1.0):
-        print("`test_training_multiple_gf()` with config `{}`".
+        print("\n`test_training_multiple_gf()` with config `{}`".
               format({k: v for k, v in locals().items() if k != 'self'}))
-        torch.manual_seed(43)
+        torch.manual_seed(0)
         np.random.seed(43)
 
         # SIMULATE DATA -----
@@ -35,7 +35,6 @@ class TestTraining(unittest.TestCase):
                 num_groups=40,
                 obs_per_group=1,
                 num_raneffects=num_res_g + 1,
-                std_multi=.25
             )
             df_train.append(df_train_g.rename(columns={'y': f"g{i + 1}_y", 'group': f'g{i + 1}'}))
             df_raneff_true.append(df_raneff_true_g.assign(gf=f"g{i + 1}"))

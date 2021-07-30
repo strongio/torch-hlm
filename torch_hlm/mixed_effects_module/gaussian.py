@@ -15,14 +15,38 @@ from torch_hlm.low_rank import LowRankMultivariateNormal
 
 class GaussianReSolver(ReSolver):
 
+    def __init__(self,
+                 X: torch.Tensor,
+                 y: torch.Tensor,
+                 group_ids: np.ndarray,
+                 design: dict,
+                 prior_precisions: Optional[dict] = None,
+                 slow_start: Optional[float] = None,
+                 verbose: bool = False):
+
+        super().__init__(
+            X=X, y=y,
+            group_ids=group_ids,
+            design=design,
+            prior_precisions=prior_precisions,
+            slow_start=slow_start,
+            verbose=verbose
+        )
+
+        # precompute Htild_inv
+        if prior_precisions is not None:
+            for gf, kwargs in self.static_kwargs_per_gf.items():
+                # TODO: use solve
+                XtX = kwargs['XtX']
+                pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
+                kwargs['XtX_inv'] = torch.inverse(XtX + pp)
+
     def __call__(self,
                  fe_offset: torch.Tensor,
                  max_iter: Optional[int] = None,
                  reltol: float = .01,
                  prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
-        if len(self.design) > 1:
-            raise NotImplementedError(f"{type(self).__name__} not currently implemented for multiple grouping factors.")
         return super(GaussianReSolver, self).__call__(
             fe_offset=fe_offset,
             max_iter=max_iter,
@@ -31,6 +55,19 @@ class GaussianReSolver(ReSolver):
             **kwargs
         )
 
+    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
+        kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
+        for gf, kwargs in kwargs_per_gf.items():
+
+            if prior_precisions is not None:
+                # TODO: use solve
+                # Htild_inv was not precomputed, compute it here
+                XtX = kwargs['XtX']
+                pp = prior_precisions[gf].expand(len(XtX), -1, -1)
+                kwargs['XtX_inv'] = torch.inverse(XtX + pp)
+
+        return kwargs_per_gf
+
     # noinspection PyMethodOverriding
     def solve_step(self,
                    X: torch.Tensor,
@@ -38,6 +75,7 @@ class GaussianReSolver(ReSolver):
                    offset: torch.Tensor,
                    group_ids: np.ndarray,
                    XtX: torch.Tensor,
+                   XtX_inv: torch.Tensor,
                    prior_precision: torch.Tensor,
                    prev_res: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -60,28 +98,31 @@ class GaussianReSolver(ReSolver):
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
 
-        # not currently supported:
-        assert not self.slow_start
-        assert prev_res is None
-        # if prev_res is not None:
-        #     offset = offset + (prev_res[group_ids_seq] * X).sum(1)
-
         yoff = y - offset
-        Xty_els = X * yoff.unsqueeze(1)  # TODO: sample_weights
-        Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
 
-        res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
+        if self.slow_start:
+            if prev_res is None:
+                prev_res = torch.zeros(num_groups, num_res)
+            yhat = (prev_res[group_ids_seq] * X).sum(1)
+            grad_els = X * (yoff - yhat).unsqueeze(-1).expand(-1, num_res)
+            grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
+            grad = grad_no_pen - (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
+            iter_ = len(self.history) + 1
+            step_size = (iter_ / (float(self.slow_start) + iter_))
+            res = prev_res + step_size * (XtX_inv @ grad.unsqueeze(-1)).squeeze(-1)
+        else:
+            Xty_els = X * yoff.unsqueeze(1)  # TODO: sample_weights
+            Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
+            res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
 
-        if prev_res is not None:
-            res = prev_res + res
         return res
 
-    def _check_if_converged(self, reltol: float) -> bool:
+    def _check_if_converged(self, reltol: float, min_iter: int) -> bool:
         if len(self.design) == 1:
             assert not self.slow_start
             # if only one grouping factor, then solution is closed form, not iterative
             return True
-        return super()._check_if_converged(reltol=reltol)
+        return super()._check_if_converged(reltol, min_iter)
 
 
 class GaussianMixedEffectsModule(MixedEffectsModule):

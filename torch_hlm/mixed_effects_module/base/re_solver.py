@@ -58,6 +58,7 @@ class ReSolver:
     def __call__(self,
                  fe_offset: torch.Tensor,
                  max_iter: Optional[int] = None,
+                 min_iter: int = 5,
                  reltol: float = .01,
                  prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
@@ -93,7 +94,7 @@ class ReSolver:
             # print(self.history[-1])
 
             # check convergence:
-            if self._check_if_converged(reltol):
+            if self._check_if_converged(reltol, min_iter):
                 break
                 # TODO: if only one grouping factor, drop converged groups
 
@@ -102,6 +103,9 @@ class ReSolver:
 
         res_per_gf = self.history[-1]
         self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
+        self._prev_re_offsets = {
+            k: v[1:].detach().sum(0) for k, v in self._recompute_offsets(fe_offset, res_per_gf).items()
+        }
 
         # print(len(self.history))
         return res_per_gf
@@ -143,16 +147,15 @@ class ReSolver:
         kwargs_per_gf = {}
         for gf in self.design.keys():
             kwargs = kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
-            kwargs['offset'] = fe_offset
             kwargs['prior_precision'] = prior_precisions[gf]
+            kwargs['prev_res'] = None
+            kwargs['offset'] = fe_offset
 
-            if self._prev_res_per_gf is None:
-                kwargs['prev_res'] = None
-            else:
+            if self._prev_res_per_gf is not None:
                 # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
-                # call it on each optimizer step. we re-use the solutions from the last step as a warm start for
-                # *within* this iterative solver
+                # call it on each optimizer step. we re-use the solutions from the last step as a warm start
                 kwargs['prev_res'] = self._prev_res_per_gf[gf]
+                kwargs['offset'] = kwargs['offset'] + self._prev_re_offsets[gf]
         return kwargs_per_gf
 
     def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor) -> Optional[dict]:
@@ -163,41 +166,50 @@ class ReSolver:
         :param fe_offset: XXX
         :return:
         """
-
-        # update offsets:
-        with torch.no_grad():
-            yhat_r = get_yhat_r(design=self.design, X=self.X, group_ids=self.group_ids, res_per_gf=self.history[-1])
-            out = {}
-            for gf1 in kwargs_per_gf.keys():
-                out[gf1] = kwargs_per_gf[gf1].copy()
-                out[gf1]['offset'] = [fe_offset.clone()]
-                for i, gf2 in enumerate(self.design.keys()):
-                    if gf1 == gf2:
-                        continue
-                    out[gf1]['offset'].append(yhat_r[:, i])
-                out[gf1]['offset'] = torch.sum(torch.stack(out[gf1]['offset']), 0)
-
-                assert self.history
-
-                # this is an iterative solver, each iteration updates the `prev_res`
-                out[gf1]['prev_res'] = self.history[-1][gf1]
-
+        assert self.history
+        res_per_gf = self.history[-1]
+        with torch.no_grad():  # TODO: in testing, `no_grad` was critical; unclear why
+            new_offsets = self._recompute_offsets(fe_offset, res_per_gf)
+        out = {}
+        for gf in kwargs_per_gf.keys():
+            out[gf] = kwargs_per_gf[gf].copy()
+            out[gf]['offset'] = new_offsets[gf].sum(0)
+            out[gf]['prev_res'] = res_per_gf[gf]
         return out
 
-    def _check_if_converged(self, reltol: float) -> bool:
+    def _recompute_offsets(self,
+                           fe_offset: torch.Tensor,
+                           res_per_gf: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        res_per_gf = {k: res_per_gf[k] for k in self.design}  # ordering matters b/c of enumerate below
+        yhat_r = get_yhat_r(design=self.design, X=self.X, group_ids=self.group_ids, res_per_gf=res_per_gf)
+        out = {}
+        for gf1 in self.design.keys():
+            out[gf1] = [fe_offset]
+            for i, gf2 in enumerate(self.design.keys()):
+                if gf1 == gf2:
+                    continue
+                out[gf1].append(yhat_r[:, i])
+            out[gf1] = torch.stack(out[gf1])
+        return out
+
+    @torch.no_grad()
+    def _check_if_converged(self, reltol: float, min_iter: int) -> bool:
         if len(self.history) < 2:
-            if self.verbose:
-                print(f"{type(self).__name__} Iter {len(self.history)}: relchange --")
             return False
-        converged = True
+        converged = len(self.history) >= min_iter
+        _verbose = {}
         for gf, changes in self._check_convergence():
             # TODO: patience
+            if torch.isinf(changes).any() or torch.isnan(changes).any():
+                raise RuntimeError("Convergence failed; nan/inf values")
             if (changes > reltol).any():
                 converged = False
                 if not self.verbose:
                     break
             if self.verbose:
-                print(f"{type(self).__name__} - Iter {len(self.history)} - Gf {gf} - Relchange {changes.max()}")
+                _verbose[gf] = changes.max().item()
+        if self.verbose:
+            print(f"{type(self).__name__} - Iter {len(self.history)} - Max. Relchanges {_verbose}")
         return converged
 
     def _check_convergence(self) -> Iterable[Tuple[str, torch.Tensor]]:
