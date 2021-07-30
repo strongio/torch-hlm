@@ -222,7 +222,7 @@ class MixedEffectsModel(BaseEstimator):
         if isinstance(self.covariance, dict):
             # set/freeze cov:
             for gf, gf_cov in self.covariance.items():
-                self.module_.set_re_cov(gf, gf_cov)
+                self.module_.covariance[gf].set(gf_cov)  # .set_re_cov(gf, gf_cov)
                 for p in self.module_.covariance[gf].parameters():
                     p.requires_grad_(False)
         else:
@@ -231,7 +231,7 @@ class MixedEffectsModel(BaseEstimator):
                 std_devs = torch.ones(len(idx) + 1)
                 if len(idx):
                     std_devs[1:] *= (.5 / np.sqrt(len(idx)))
-                self.module_.set_re_cov(gf, cov=torch.diag_embed(std_devs ** 2))
+                self.module_.covariance[gf].set(torch.diag_embed(std_devs ** 2))
 
         return self.module_
 

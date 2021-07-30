@@ -82,9 +82,17 @@ class MixedEffectsModule(torch.nn.Module):
             else:
                 self.rf_idx[grouping_factor] = list(rf)
 
+        if not isinstance(covariance, dict):
+            assert isinstance(covariance, str)
+            covariance = {gf: covariance for gf in self.grouping_factors}
         self.covariance = torch.nn.ModuleDict()
         for gf, idx in self.rf_idx.items():
-            self.covariance[gf] = Covariance.from_name(covariance, rank=len(idx) + 1)
+            gf_cov = covariance[gf]
+            if isinstance(covariance[gf], str):
+                self.covariance[gf] = Covariance.from_name(gf_cov, rank=len(idx) + 1)
+            else:
+                assert isinstance(gf_cov, Covariance), f"expecteed {gf_cov} to be string or `Covariance`"
+                self.covariance[gf] = gf_cov
         print(self.covariance.state_dict())
 
         if not isinstance(re_scale_penalty, dict):
@@ -99,9 +107,6 @@ class MixedEffectsModule(torch.nn.Module):
     def grouping_factors(self) -> Sequence:
         return list(self.rf_idx.keys())
 
-    def set_re_cov(self, grouping_factor: str, cov: torch.Tensor):
-        rel_cov = cov / self.residual_var
-        self.covariance[grouping_factor].set(rel_cov.to(**get_to_kwargs(self)))
 
     def _is_cov_param(self, param: torch.Tensor) -> bool:
         return any(param is cov_param for cov_param in self.covariance.parameters())
