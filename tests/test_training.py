@@ -16,7 +16,7 @@ from torch_hlm.simulate import simulate_raneffects
 
 class TestTraining(unittest.TestCase):
 
-    @parameterized.expand([('gaussian', [0, 0, 0]), ('binary', [0, 0, 0])])
+    @parameterized.expand([('binary', [0, 0])])
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
@@ -32,9 +32,10 @@ class TestTraining(unittest.TestCase):
         df_raneff_true = []
         for i, num_res_g in enumerate(num_res):
             df_train_g, df_raneff_true_g = simulate_raneffects(
-                num_groups=30 + 10 * i,
+                num_groups=40,
                 obs_per_group=1,
-                num_raneffects=num_res_g + 1
+                num_raneffects=num_res_g + 1,
+                std_multi=.25
             )
             df_train.append(df_train_g.rename(columns={'y': f"g{i + 1}_y", 'group': f'g{i + 1}'}))
             df_raneff_true.append(df_raneff_true_g.assign(gf=f"g{i + 1}"))
@@ -69,7 +70,6 @@ class TestTraining(unittest.TestCase):
             raneff_design=raneff_design,
             response='y',
             covariance=covariance,
-           # module_kwargs={'verbose': 2}
         )
         model.fit(df_train, loss_type='h_likelihood')
 
@@ -112,7 +112,8 @@ class TestTraining(unittest.TestCase):
                                 num_obs_per_group: int = 100,
                                 intercept: float = -1.,
                                 noise: float = 1.0):
-        print("`test_training_single_gf()` with config `{}`".format({k: v for k, v in locals().items() if k != 'self'}))
+        print("\n`test_training_single_gf()` with config `{}`".
+              format({k: v for k, v in locals().items() if k != 'self'}))
         torch.manual_seed(43)
         np.random.seed(43)
 

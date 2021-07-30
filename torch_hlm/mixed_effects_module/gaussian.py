@@ -21,7 +21,8 @@ class GaussianReSolver(ReSolver):
                  reltol: float = .01,
                  prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
-        # TODO: option for closed form w/multiple grouping factors, instead of iterative
+        if len(self.design) > 1:
+            raise NotImplementedError(f"{type(self).__name__} not currently implemented for multiple grouping factors.")
         return super(GaussianReSolver, self).__call__(
             fe_offset=fe_offset,
             max_iter=max_iter,
@@ -59,18 +60,17 @@ class GaussianReSolver(ReSolver):
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
 
-        if prev_res is not None:
-            offset = offset + (prev_res[group_ids_seq] * X).sum(1)
+        # not currently supported:
+        assert not self.slow_start
+        assert prev_res is None
+        # if prev_res is not None:
+        #     offset = offset + (prev_res[group_ids_seq] * X).sum(1)
 
         yoff = y - offset
         Xty_els = X * yoff.unsqueeze(1)  # TODO: sample_weights
         Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
 
-        iter_ = len(self.history) + 1
-        m = 1 - (iter_ / (float(self.slow_start) + iter_))
-        extra_penalty = (m ** 2) * num_obs * torch.eye(num_res)
-
-        res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision + extra_penalty)[0].squeeze(-1)
+        res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
 
         if prev_res is not None:
             res = prev_res + res
@@ -127,7 +127,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                   y: torch.Tensor,
                   group_ids: np.ndarray,
                   cache: Optional[dict] = None,
-                  loss_type: Optional[str] = None):
+                  loss_type: Optional[str] = None,
+                  skip_res: bool = False):
         if loss_type == 'closed_form':
             return -self._get_log_prob(X=X, y=y, group_ids=group_ids)
         return super()._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type)

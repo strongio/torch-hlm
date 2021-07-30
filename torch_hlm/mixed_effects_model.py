@@ -196,7 +196,12 @@ class MixedEffectsModel(BaseEstimator):
             covariance_arg = 'log_cholesky'
             if len(self.grouping_factors) == 1 and not isinstance(self.covariance, dict):
                 self.covariance = {self.grouping_factors[0]: self.covariance}
-            self.covariance = {k: torch.as_tensor(v) for k, v in self.covariance.items()}
+            from torch_hlm.covariance import Covariance
+            covariance_arg = {
+                k: Covariance.from_name('log_cholesky', rank=len(v)).set(torch.as_tensor(v))
+                for k, v in self.covariance.items()
+            }
+            # self.covariance = {k: torch.as_tensor(v) for k, v in self.covariance.items()}
 
         module_kwargs = {
             'fixeff_features': [],
@@ -220,9 +225,8 @@ class MixedEffectsModel(BaseEstimator):
         self.module_ = MixedEffectsModule.from_name(self.response_type, **module_kwargs)
 
         if isinstance(self.covariance, dict):
-            # set/freeze cov:
+            # freeze cov:
             for gf, gf_cov in self.covariance.items():
-                self.module_.covariance[gf].set(gf_cov)  # .set_re_cov(gf, gf_cov)
                 for p in self.module_.covariance[gf].parameters():
                     p.requires_grad_(False)
         else:

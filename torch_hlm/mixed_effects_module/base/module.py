@@ -93,7 +93,6 @@ class MixedEffectsModule(torch.nn.Module):
             else:
                 assert isinstance(gf_cov, Covariance), f"expecteed {gf_cov} to be string or `Covariance`"
                 self.covariance[gf] = gf_cov
-        print(self.covariance.state_dict())
 
         if not isinstance(re_scale_penalty, dict):
             re_scale_penalty = {gf: float(re_scale_penalty) for gf in self.grouping_factors}
@@ -246,7 +245,8 @@ class MixedEffectsModule(torch.nn.Module):
     def get_res(self,
                 X: torch.Tensor,
                 y: torch.Tensor,
-                group_ids: Sequence) -> Dict[str, torch.Tensor]:
+                group_ids: Sequence,
+                **kwargs) -> Dict[str, torch.Tensor]:
         """
         Get the random-effects.
         :param X: A 2D model-matrix Tensor
@@ -261,7 +261,8 @@ class MixedEffectsModule(torch.nn.Module):
         solver = self.solver_cls(
             X=X, y=y,
             group_ids=validate_group_ids(group_ids, len(self.grouping_factors)),
-            design=self.rf_idx
+            design=self.rf_idx,
+            **kwargs
         )
         return solver(
             fe_offset=validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx])),
@@ -311,6 +312,8 @@ class MixedEffectsModule(torch.nn.Module):
         )}
 
         # create the closure which returns the loss
+        epoch = 0
+
         def closure():
             optimizer.zero_grad()
             loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache)
@@ -322,7 +325,6 @@ class MixedEffectsModule(torch.nn.Module):
                 progress.set_description(f"Epoch {epoch:,}; Loss {loss.item():.4}")
             return loss
 
-        epoch = 0
         while True:
             if progress:
                 progress.reset()
