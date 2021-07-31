@@ -188,13 +188,7 @@ class TestTraining(unittest.TestCase):
             print(df_corr)
             raise
 
-        try:
-            self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .1)
-            wt = model.module_.fixed_effects_nn.weight.squeeze()
-            self.assertLess(abs(wt[0] - .5), .1)
-            self.assertLess(wt[1:].abs().max(), .1)
-        except AssertionError as e:
-            if loss_type == 'cv':
-                print(f"failed to discover true-params but not raising b/c loss_type=='cv':\n{e}")
-            else:
-                raise e
+        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .1)
+        wt = model.module_.fixed_effects_nn.weight.squeeze()
+        self.assertLess(abs(wt[0] - .5), .1)
+        self.assertLess(wt[1:].abs().max(), .1)

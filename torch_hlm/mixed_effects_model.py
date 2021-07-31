@@ -155,7 +155,7 @@ class MixedEffectsModel(BaseEstimator):
             if prog:
                 prog.update()
                 prog.set_description(
-                    f"Epoch {epoch:,}; Loss {loss.item():.4}; Convergence {stopping.get_info('last_abs'):.4}"
+                    f"Epoch {epoch:,}; Loss {loss.item():.4}; Convergence {stopping.get_info()}"
                 )
 
         callbacks = list(callbacks)
@@ -172,7 +172,7 @@ class MixedEffectsModel(BaseEstimator):
             try:
                 if prog:
                     prog.reset()
-                    prog.set_description(f"Epoch {epoch:,}; Loss -; Convergence {stopping.get_info('last_abs'):.4}")
+                    prog.set_description(f"Epoch {epoch:,}; Loss -; Convergence {stopping.get_info()}")
                 epoch_loss = next(fit_loop)
                 for callback in callbacks:
                     callback(epoch_loss)
@@ -304,8 +304,8 @@ class MixedEffectsModel(BaseEstimator):
 class Stopping:
     def __init__(self,
                  type: str = 'params',
-                 abstol: float = .001,
-                 reltol: float = float('inf'),
+                 abstol: Optional[float] = .001,
+                 reltol: Optional[float] = None,
                  optimizer: Optional[torch.optim.Optimizer] = None):
 
         self.type = 'params' if type.startswith('param') else 'loss'
@@ -313,15 +313,11 @@ class Stopping:
         self.abstol = abstol
         self.reltol = reltol
         self.old_value = None
-        self._info = {'last_abs_change': None, 'last_rel_change': None}
+        self._info = (float('nan'), min(self.abstol or float('inf'), self.reltol or float('inf')))
 
     @torch.no_grad()
-    def get_info(self, key: str, reduction: str = 'max') -> float:
-        info = self._info.get(key)
-        if info is None:
-            return float('nan')
-        else:
-            return getattr(info, reduction)().item()
+    def get_info(self, fmt: str = "{:.4}/{:}") -> str:
+        return fmt.format(*self._info)
 
     @torch.no_grad()
     def get_new_value(self, loss: Optional[float]):
@@ -341,8 +337,18 @@ class Stopping:
         if self.old_value is None:
             self.old_value = new_value
             return False
-        self._info = {}
-        self._info['last_abs'] = abs_change = (new_value - self.old_value).abs()
-        self._info['last_rel'] = rel_change = abs_change / self.old_value.abs()
+        old_value = self.old_value
         self.old_value = new_value
-        return abs_change.max() < self.abstol and rel_change.max() < self.reltol
+        abs_change = (new_value - old_value).abs()
+        assert not (self.abstol is None and self.reltol is None)
+        if self.abstol is not None and (abs_change > self.abstol).any():
+            self._info = (abs_change.max(), self.abstol)
+            return False
+        if self.reltol is None:
+            self._info = (abs_change.max(), self.abstol)  # even if we've converged, print up to date info
+        else:
+            rel_change = abs_change / old_value.abs()
+            self._info = (rel_change.max(), self.reltol)
+            if (rel_change > self.reltol).any():
+                return False
+        return True
