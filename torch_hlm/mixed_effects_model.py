@@ -109,20 +109,22 @@ class MixedEffectsModel(BaseEstimator):
                     stopping: Union['Stopping', tuple, dict] = ('params', .001),
                     callbacks: Collection[Callable] = (),
                     prog: bool = True,
-                    max_num_epochs: Optional[int] = 1) -> 'MixedEffectsModel':
+                    max_num_epochs: Optional[int] = 1,
+                    clip_grad: Optional[float] = 2.0) -> 'MixedEffectsModel':
         """
         (Partially) fit the underlying ``MixedEffectsModule``.
 
         :param X: From ``build_model_mats()``
         :param y: From ``build_model_mats()``
         :param group_ids: From ``build_model_mats()``
-        :param stopping:
+        :param stopping: TODO
         :param callbacks: Functions to call on each epoch. Takes a single argument, the loss-history for this call to
          partial_fit.
-        :param prog:
+        :param prog: TODO
         :param max_num_epochs: The maximum number of epochs to fit. For similarity to other sklearn estimator's
          ``partial_fit()`` behavior, this default to 1, so that a single call to ``partial_fit()`` performs a single
          epoch.
+        :param clip_grad: TODO
         :return: This instance
         """
         if self.module_ is None:
@@ -147,29 +149,34 @@ class MixedEffectsModel(BaseEstimator):
             assert isinstance(stopping, Stopping)
             stopping.optimizer = self.optimizer_
 
+        _inner_callbacks = []
+        if clip_grad:
+            _inner_callbacks.append(lambda x: torch.nn.utils.clip_grad_value_(self.module_.parameters(), clip_grad))
+
         if prog:
             if isinstance(self.optimizer_, torch.optim.LBFGS):
                 prog = tqdm(total=self.optimizer_.param_groups[0]['max_eval'])
             else:
                 prog = tqdm(total=1)
 
-        def _prog_update(loss):
-            if prog:
+            def _prog_update(loss):
                 prog.update()
                 prog.set_description(
                     f"Epoch {epoch:,}; Loss {loss.item():.4}; Convergence {stopping.get_info()}"
                 )
 
-        callbacks = list(callbacks)
+            _inner_callbacks.append(_prog_update)
+
         fit_loop = self.module_.fit_loop(
             X=X,
             y=y,
             group_ids=group_ids,
             optimizer=self.optimizer_,
             loss_type=self.loss_type,
-            callbacks=[_prog_update]
+            callbacks=_inner_callbacks
         )
 
+        callbacks = list(callbacks)
         while True:
             try:
                 if prog:
