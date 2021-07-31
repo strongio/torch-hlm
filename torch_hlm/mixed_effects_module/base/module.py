@@ -122,20 +122,25 @@ class MixedEffectsModule(torch.nn.Module):
 
         covariance_matrix = self.covariance[grouping_factor]() * self.residual_var
         covariance_matrix = covariance_matrix + eps * torch.eye(len(covariance_matrix))
+
+        dist = None
         try:
             dist = torch.distributions.MultivariateNormal(
                 loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix,
-                validate_args=False
+                validate_args=True  # TODO: profile this
             )
         except RuntimeError as e:
-            if 'cholesky' not in str(e):
+            if 'singular' not in str(e):
                 raise e
-            dist = None
-        if dist is None or not torch.isclose(dist.covariance_matrix, dist.precision_matrix.inverse(), atol=1e-04).all():
+
+        if dist is None:
+            msg = f"eps of {eps} insufficient to ensure posdef covariance matrix for gf={grouping_factor}"
             if eps < .01:
                 if eps > 1e-04:
-                    warn(f"eps of {eps} insufficient to ensure posdef, increasing 10x")
+                    warn(f"{msg}, increasing 10x")
                 return self.re_distribution(grouping_factor, eps=eps * 10)
+            else:
+                raise RuntimeError(msg)
         return dist
 
     # forward / re-solve -------
@@ -334,30 +339,48 @@ class MixedEffectsModule(torch.nn.Module):
                      y: torch.Tensor,
                      group_ids: np.ndarray,
                      cache: Optional[dict] = None,
-                     cv: Optional[Iterator] = None,
-                     **kwargs):
+                     cv_config: Optional[dict] = None,
+                     **kwargs) -> torch.Tensor:
         """
-        XXX
-        :return:
+        For many types of mixed-effects models, finding the posterior modes is tractable but evaluating the full
+        likelihood is not. One option afforded by autograd is to optimize the covariance based on iid likelihood on
+        *holdout* data. This method involves generating splits within each group of varying sizes, and optimizing the
+        parameters so minimize loss on the test-splits.
+
+        :param X: A 2D model-matrix Tensor
+        :param y: A 1D target/response Tensor.
+        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
+        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+        :param cache: Dictionary of cached objects that don't need to be re-created each call (e.g. ``ReSolver``)
+        :param cv_config: A dictionary with config for the cross-validation. This is experimental and subject to
+        change, current options are: `n_splits` for the number of splits per each round of stratified splitting (default
+         3); `quantile_width` for controlling the number of rounds of splits, and the sizes of the train/test-split on
+         each (e.g. default of .20 will create perform 4 rounds of stratified splitting train/test with proportions
+        `[.20/.80, .40/.60, .60/.40, .80/.20]`); and `random_state` (default None) for controlling the random-state of
+         the splitter.
+        :param kwargs: Other keyword args to pass to each ``ReSolver``.
+        :return: The loss
         """
         cache = cache or {}
 
-        # TODO
-        quantile_width = .20
-        n_splits = 3
-        random_state = 10
-        # /
+        _defaults = {'quantile_width': .20, 'n_splits': 3, 'random_state': None}
+        cv_config = {**_defaults, **(cv_config or {})}
 
         if not any(k.startswith('split') for k in cache):
             for gfi, gf in enumerate(self.grouping_factors):
+                # calculate quantiles:
                 _, counts = np.unique(group_ids[:, gfi], return_counts=True)
-                q = max(1 / np.median(counts), quantile_width)
+                q = max(1 / np.median(counts), cv_config['quantile_width'])
                 assert q <= .5, f"Cannot do cv on this dataset, median group-size for {gf} is <2"
                 quantiles = np.arange(q, 1., q)
                 if 1 - quantiles[-1] < q / 2:
                     quantiles = quantiles[0:-1]
+
+                # create splits + solvers for each:
                 for q in quantiles:
-                    splitter = StratifiedShuffleSplit(n_splits=n_splits, test_size=q, random_state=random_state)
+                    splitter = StratifiedShuffleSplit(
+                        n_splits=cv_config['n_splits'], test_size=q, random_state=cv_config['random_state']
+                    )
                     for i, (train_idx, test_idx) in enumerate(splitter.split(X=X, y=group_ids[:, gfi]), 1):
                         solver = self.solver_cls(
                             X=X[train_idx],
