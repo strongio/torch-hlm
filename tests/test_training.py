@@ -70,8 +70,9 @@ class TestTraining(unittest.TestCase):
             raneff_design=raneff_design,
             response='y',
             covariance=covariance,
+            loss_type='iid'
         )
-        model.fit(df_train, loss_type='iid')  # callbacks=[lambda x: print(model.module_.fixed_effects_nn.bias)]
+        model.fit(df_train)
 
         # COMPARE TRUE vs. EST -----
         with torch.no_grad():
@@ -161,9 +162,10 @@ class TestTraining(unittest.TestCase):
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design={'group': predictors},
             response='y',
-            covariance=covariance
+            covariance=covariance,
+            loss_type=loss_type
         )
-        model.fit(df_train)
+        model.fit(df_train)  # , callbacks=[lambda x: print(model.module_.state_dict())])
 
         # COMPARE TRUE vs. EST -----
         with torch.no_grad():

@@ -1,10 +1,10 @@
 from collections import OrderedDict
-from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type
+from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type, Collection, Callable
 from warnings import warn
 
 import torch
 import numpy as np
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 
 from tqdm.auto import tqdm
 
@@ -55,7 +55,6 @@ class MixedEffectsModule(torch.nn.Module):
                  verbose: int = 1):
 
         super().__init__()
-        self.verbose = verbose
 
         # fixed effects:
         if isinstance(fixeff_features, int):
@@ -144,7 +143,8 @@ class MixedEffectsModule(torch.nn.Module):
                 X: torch.Tensor,
                 group_ids: Sequence,
                 re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
-                res_per_gf: Optional[Union[dict, torch.Tensor]] = None) -> torch.Tensor:
+                res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
+                quiet: bool = False) -> torch.Tensor:
         """
 
         :param X: A 2D model-matrix Tensor
@@ -174,9 +174,11 @@ class MixedEffectsModule(torch.nn.Module):
                     # i.e. re_solve_data is empty
                     res_per_gf = {gf: torch.zeros((0, len(idx) + 1)) for gf, idx in self.rf_idx.items()}
 
-                res_per_gf_padded = pad_res_per_gf(res_per_gf, group_ids, rs_group_ids, verbose=bool(self.verbose))
+                res_per_gf_padded = pad_res_per_gf(res_per_gf, group_ids, rs_group_ids, verbose=not quiet)
 
-                return self.forward(X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf_padded)
+                return self.forward(
+                    X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf_padded, quiet=quiet
+                )
 
         if re_solve_data is not None:
             raise TypeError("Must pass one of `re_solve_data`, `betas_per_group`; got both.")
@@ -269,43 +271,29 @@ class MixedEffectsModule(torch.nn.Module):
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
                  loss_type: Optional[str] = None,
+                 callbacks: Collection[Callable] = (),
                  **kwargs) -> Iterator[float]:
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, len(self.grouping_factors))
 
-        # progress bar
-        if not self.verbose:
-            progress = None
-        elif isinstance(optimizer, torch.optim.LBFGS):
-            progress = tqdm(total=optimizer.param_groups[0]['max_eval'])
-        else:
-            progress = tqdm(total=1)
-
         # solver will go here:
         cache = {}
 
         # create the closure which returns the loss
-        epoch = 0
-
         def closure():
             optimizer.zero_grad()
             loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache, **kwargs)
             if torch.isnan(loss):
                 raise RuntimeError("Encountered `nan` loss in training.")
             loss.backward()
-            if progress:
-                progress.update()
-                progress.set_description(f"Epoch {epoch:,}; Loss {loss.item():.4}")
+            for callback in callbacks:
+                callback(loss)
             return loss
 
         while True:
-            if progress:
-                progress.reset()
-                progress.set_description(f"Epoch {epoch:,}")
             floss = optimizer.step(closure).item()
             yield floss
-            epoch += 1
 
     def get_loss(self,
                  X: torch.Tensor,
@@ -433,7 +421,6 @@ class MixedEffectsModule(torch.nn.Module):
                 group_ids=group_ids,
                 design=self.rf_idx,
                 prior_precisions=self._get_prior_precisions(detach=True),
-                verbose=self.verbose > 1,
                 **kwargs
             )
 
