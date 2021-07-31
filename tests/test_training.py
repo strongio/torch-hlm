@@ -16,7 +16,10 @@ from torch_hlm.simulate import simulate_raneffects
 
 class TestTraining(unittest.TestCase):
 
-    @parameterized.expand([('gaussian', [0, 0]), ('binary', [0, 0])])
+    @parameterized.expand([
+        ('gaussian', [0, 0]),
+        ('binary', [0, 0])
+    ])
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
@@ -105,7 +108,12 @@ class TestTraining(unittest.TestCase):
             self.assertLess(abs(wt[0] - .5), .1)
             self.assertLess(wt[1:].abs().max(), .1)
 
-    @parameterized.expand([('binary', 'cv'), ('binary', None), ('gaussian', 'cv'), ('gaussian', None)])
+    @parameterized.expand([
+        ('binary', 'cv'),
+        ('binary', None),
+        ('gaussian', 'cv'),
+        ('gaussian', None)
+    ])
     def test_training_single_gf(self,
                                 response_type: str,
                                 loss_type: Optional[str] = None,
