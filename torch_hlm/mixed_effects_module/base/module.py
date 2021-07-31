@@ -4,9 +4,7 @@ from warnings import warn
 
 import torch
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
-
-from tqdm.auto import tqdm
+from sklearn.model_selection import StratifiedShuffleSplit
 
 from ..utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r, pad_res_per_gf
 from ...covariance import Covariance
@@ -51,8 +49,7 @@ class MixedEffectsModule(torch.nn.Module):
                  raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
                  covariance: str = 'log_cholesky',
-                 re_scale_penalty: Union[float, dict] = 0.,
-                 verbose: int = 1):
+                 re_scale_penalty: Union[float, dict] = 0.):
 
         super().__init__()
 
@@ -129,8 +126,8 @@ class MixedEffectsModule(torch.nn.Module):
                 loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix,
                 validate_args=True  # TODO: profile this
             )
-        except RuntimeError as e:
-            if 'singular' not in str(e):
+        except ValueError as e:
+            if 'invalid' not in str(e):
                 raise e
 
         if dist is None:
@@ -392,6 +389,8 @@ class MixedEffectsModule(torch.nn.Module):
                         )
                         cache[(gf, q, i)] = (solver, test_idx)
 
+        prior_precisions = self._get_prior_precisions(detach=False) if not self.fixed_cov else None
+
         log_probs = []
         for k, v in cache.items():
             if not isinstance(k, tuple) and isinstance(v, tuple):
@@ -400,7 +399,7 @@ class MixedEffectsModule(torch.nn.Module):
             solver, test_idx = v
             res_per_gf = solver(
                 fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
-                prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
+                prior_precisions=prior_precisions
             )
             res_per_gf = pad_res_per_gf(
                 res_per_gf, group_ids1=solver.group_ids, group_ids2=group_ids[test_idx], verbose=solver.verbose

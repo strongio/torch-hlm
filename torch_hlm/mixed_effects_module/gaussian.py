@@ -121,15 +121,13 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                  raneff_features: Dict[str, Union[int, Sequence]],
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
                  covariance: str = 'log_cholesky',
-                 re_scale_penalty: Union[float, dict] = 0.,
-                 verbose: int = 1):
+                 re_scale_penalty: Union[float, dict] = 0.):
         super().__init__(
             fixeff_features=fixeff_features,
             raneff_features=raneff_features,
             fixed_effects_nn=fixed_effects_nn,
             covariance=covariance,
             re_scale_penalty=re_scale_penalty,
-            verbose=verbose
         )
         self._residual_std_dev_log = torch.nn.Parameter(.01 * torch.randn(1))
 

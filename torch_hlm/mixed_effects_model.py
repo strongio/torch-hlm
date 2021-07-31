@@ -116,8 +116,10 @@ class MixedEffectsModel(BaseEstimator):
         :param X: From ``build_model_mats()``
         :param y: From ``build_model_mats()``
         :param group_ids: From ``build_model_mats()``
+        :param stopping:
         :param callbacks: Functions to call on each epoch. Takes a single argument, the loss-history for this call to
          partial_fit.
+        :param prog:
         :param max_num_epochs: The maximum number of epochs to fit. For similarity to other sklearn estimator's
          ``partial_fit()`` behavior, this default to 1, so that a single call to ``partial_fit()`` performs a single
          epoch.
@@ -194,15 +196,6 @@ class MixedEffectsModel(BaseEstimator):
                 break
 
         return self
-
-    @torch.no_grad()
-    def _check_convergence(self, old: Optional[torch.Tensor]) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-        new = torch.cat([param.view(-1) for param in self.module_.parameters()]).clone()
-        if old is None:
-            changes = None
-        else:
-            changes = (new - old).abs() / old.abs()
-        return changes, new
 
     def build_model_mats(self,
                          df: pd.DataFrame,
