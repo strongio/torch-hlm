@@ -8,7 +8,7 @@ from sklearn.model_selection import StratifiedKFold
 
 from tqdm.auto import tqdm
 
-from ..utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r, get_to_kwargs
+from ..utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r, pad_res_per_gf
 from ...covariance import Covariance
 
 
@@ -174,25 +174,7 @@ class MixedEffectsModule(torch.nn.Module):
                     # i.e. re_solve_data is empty
                     res_per_gf = {gf: torch.zeros((0, len(idx) + 1)) for gf, idx in self.rf_idx.items()}
 
-                # there is no requirement that all groups in `group_ids` are present in `group_data`, or vice versa, so
-                # need to map the re_solve output
-                res_per_gf_padded = {}
-                for gf_i, gf in enumerate(self.grouping_factors):
-                    ugroups_target = {gid: i for i, gid in enumerate(np.unique(group_ids[:, gf_i]))}
-                    ugroups_solve = {gid: i for i, gid in enumerate(np.unique(rs_group_ids[:, gf_i]))}
-                    set1 = set(ugroups_solve) - set(ugroups_target)
-                    if set1 and self.verbose:
-                        print(f"there are {len(set1):,} groups in `re_solve_data` but not in `X`")
-                    set2 = set(ugroups_target) - set(ugroups_solve)
-                    if set2 and self.verbose:
-                        print(f"there are {len(set2):,} groups in `X` but not in `re_solve_data`")
-
-                    res_per_gf_padded[gf] = torch.zeros((len(ugroups_target), len(self.rf_idx[gf]) + 1))
-                    for gid_target, idx_target in ugroups_target.items():
-                        idx_solve = ugroups_solve.get(gid_target)
-                        if idx_solve is None:
-                            continue
-                        res_per_gf_padded[gf][idx_target] = res_per_gf[gf][idx_solve]
+                res_per_gf_padded = pad_res_per_gf(res_per_gf, group_ids, rs_group_ids, verbose=bool(self.verbose))
 
                 return self.forward(X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf_padded)
 
@@ -375,12 +357,13 @@ class MixedEffectsModule(torch.nn.Module):
         if cv is None:
             cv = 10
         if isinstance(cv, int):
-            cv = StratifiedKFold(n_splits=cv)  # TODO: random-state?
+            # TODO: refine options here (set random-state, multiple stratified/shuffle, one per gf)
+            cv = StratifiedKFold(n_splits=cv)
 
         have_solvers = [f'fold{i + 1}' in cache for i in range(cv.n_splits)]
         if not all(have_solvers):
             assert not any(have_solvers)  # that would be weird
-            for i, (train_idx, test_idx) in enumerate(cv.split(X=X, y=group_ids[:, 0])):  # TODO: select grouping factor
+            for i, (train_idx, test_idx) in enumerate(cv.split(X=X, y=group_ids[:, 0])):  # TODO: see above
                 solver = self.solver_cls(
                     X=X[train_idx],
                     y=y[train_idx],
@@ -401,8 +384,9 @@ class MixedEffectsModule(torch.nn.Module):
                 fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
                 prior_precisions=self._get_prior_precisions(detach=False) if solver.prior_precisions is None else None
             )
-            for i in range(solver.group_ids.shape[-1]):
-                assert np.array_equal(np.unique(solver.group_ids[:, i]), np.unique(group_ids[test_idx, i]))
+            res_per_gf = pad_res_per_gf(
+                res_per_gf, group_ids1=solver.group_ids, group_ids2=group_ids[test_idx], verbose=bool(self.verbose)
+            )
             dist = self.predict_distribution_mode(X=X[test_idx], group_ids=group_ids[test_idx], res_per_gf=res_per_gf)
             log_probs.append(dist.log_prob(y[test_idx]).sum())
         return -torch.sum(torch.stack(log_probs))

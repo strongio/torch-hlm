@@ -1,4 +1,4 @@
-from typing import Sequence, Iterator
+from typing import Sequence, Iterator, Dict
 
 import torch
 import numpy as np
@@ -100,3 +100,31 @@ def get_to_kwargs(x) -> dict:
     if isinstance(x, torch.nn.Module):
         return get_to_kwargs(next(iter(x.parameters())))
     return {'dtype': x.dtype, 'device': x.device}
+
+
+def pad_res_per_gf(res_per_gf: Dict[str, torch.Tensor],
+                   group_ids1: Sequence,
+                   group_ids2: Sequence,
+                   verbose: bool = False) -> Dict[str, torch.Tensor]:
+    # there is no requirement that all groups in `group_ids` are present in `group_data`, or vice versa, so
+    # need to map the re_solve output
+    res_per_gf_padded = {}
+    for gf_i, gf in enumerate(res_per_gf):
+        ugroups_target = {gid: i for i, gid in enumerate(np.unique(group_ids1[:, gf_i]))}
+        ugroups_solve = {gid: i for i, gid in enumerate(np.unique(group_ids2[:, gf_i]))}
+        set1 = set(ugroups_solve) - set(ugroups_target)
+        if set1 and verbose:
+            print(f"there are {len(set1):,} groups in `re_solve_data` but not in `X`")
+        set2 = set(ugroups_target) - set(ugroups_solve)
+        if set2 and verbose:
+            print(f"there are {len(set2):,} groups in `X` but not in `re_solve_data`")
+
+        res_per_gf_padded[gf] = torch.zeros(
+            (len(ugroups_target), res_per_gf[gf].shape[-1]), device=res_per_gf[gf].device, dtype=res_per_gf[gf].dtype
+        )
+        for gid_target, idx_target in ugroups_target.items():
+            idx_solve = ugroups_solve.get(gid_target)
+            if idx_solve is None:
+                continue
+            res_per_gf_padded[gf][idx_target] = res_per_gf[gf][idx_solve]
+    return res_per_gf_padded
