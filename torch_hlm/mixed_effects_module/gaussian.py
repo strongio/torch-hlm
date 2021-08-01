@@ -22,8 +22,9 @@ class GaussianReSolver(ReSolver):
                  group_ids: np.ndarray,
                  design: dict,
                  prior_precisions: Optional[dict] = None,
-                 slow_start: Optional[float] = None,
+                 slow_start: bool = True,
                  verbose: bool = False):
+        self.iterative = len(design) > 1
 
         super().__init__(
             X=X, y=y,
@@ -34,14 +35,6 @@ class GaussianReSolver(ReSolver):
             verbose=verbose
         )
 
-        # precompute Htild_inv
-        if prior_precisions is not None:
-            for gf, kwargs in self.static_kwargs_per_gf.items():
-                # TODO: use solve
-                XtX = kwargs['XtX']
-                pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
-                kwargs['XtX_inv'] = torch.inverse(XtX + pp)
-
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
         kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
         for gf, kwargs in kwargs_per_gf.items():
@@ -51,65 +44,52 @@ class GaussianReSolver(ReSolver):
                 # Htild_inv was not precomputed, compute it here
                 XtX = kwargs['XtX']
                 pp = prior_precisions[gf].expand(len(XtX), -1, -1)
-                kwargs['XtX_inv'] = torch.inverse(XtX + pp)
+                kwargs['XtX_inv'] = .25 * torch.inverse(XtX + pp)
 
         return kwargs_per_gf
 
-    # noinspection PyMethodOverriding
+    @staticmethod
+    def ilink(x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    def calculate_grad(self,
+                       X: torch.Tensor,
+                       yoff: torch.Tensor,
+                       mu: torch.Tensor) -> torch.Tensor:
+        _, num_res = X.shape
+        return X * (mu - yoff).unsqueeze(-1).expand(-1, num_res)  # TODO X'A(y-p), A=[p(1-p)]/[p(1-m)]=1
+
     def solve_step(self,
                    X: torch.Tensor,
                    y: torch.Tensor,
                    offset: torch.Tensor,
-                   group_ids: np.ndarray,
-                   XtX: torch.Tensor,
-                   XtX_inv: torch.Tensor,
+                   group_ids: Sequence,
                    prior_precision: torch.Tensor,
-                   prev_res: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        :param X: N*K Tensor model-matrix
-        :param y: N Tensor of target/response
-        :param offset: N Tensor offset (e.g. fixed-effects predictions)
-        :param group_ids: 1D array of group-identifiers for each row in X/y
-        :param XtX: A G*K*K batch Tensor, full of each group's model-matrix times its own transpose. Critically, it is
-        assumed that the order of the batches corresponds to the sorted `group_ids`.
-        :param prior_precision: A K*K Tensor with the prior-precision
-        :return: A G*K Tensor with the random-effects. Each row corresponds to the sorted `group_ids`.
-        """
-        num_groups = len(XtX)
-        num_obs, num_res = X.shape
-
-        group_ids_seq = rankdata(group_ids, method='dense') - 1
-        group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
-
-        prior_precision = prior_precision.expand(len(XtX), -1, -1).clone()
-
-        assert y.shape == offset.shape, (y.shape, offset.shape)
-
-        yoff = y - offset
-
-        if self.slow_start:
-            if prev_res is None:
-                prev_res = torch.zeros(num_groups, num_res)
-            yhat = (prev_res[group_ids_seq] * X).sum(1)
-            grad_els = X * (yoff - yhat).unsqueeze(-1).expand(-1, num_res)
-            grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
-            grad = grad_no_pen - (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
-            iter_ = len(self.history) + 1
-            step_size = (iter_ / (float(self.slow_start) + iter_))
-            res = prev_res + step_size * (XtX_inv @ grad.unsqueeze(-1)).squeeze(-1)
+                   Htild_inv: torch.Tensor,
+                   prev_res: Optional[torch.Tensor],
+                   XtX: Optional[torch.Tensor] = None,
+                   **kwargs
+                   ) -> torch.Tensor:
+        if self.iterative:
+            return super(GaussianReSolver, self).solve_step(
+                X=X,
+                y=y,
+                offset=offset,
+                group_ids=group_ids,
+                prior_precision=prior_precision,
+                Htild_inv=Htild_inv,
+                prev_res=prev_res,
+            )
         else:
+            assert XtX is not None
+            num_obs, num_res = X.shape
+            num_groups = len(XtX)
+            group_ids_seq = rankdata(group_ids, method='dense') - 1
+            group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
+            yoff = y - offset
             Xty_els = X * yoff.unsqueeze(1)  # TODO: sample_weights
             Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
-            res = torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
-
-        return res
-
-    def _check_if_converged(self, reltol: float, min_iter: int) -> bool:
-        if len(self.design) == 1:
-            assert not self.slow_start
-            # if only one grouping factor, then solution is closed form, not iterative
-            return True
-        return super()._check_if_converged(reltol, min_iter)
+            return torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
 
 
 class GaussianMixedEffectsModule(MixedEffectsModule):

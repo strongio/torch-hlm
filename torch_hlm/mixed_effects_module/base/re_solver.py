@@ -1,9 +1,10 @@
 from random import shuffle
-from typing import Optional, Sequence, Dict, Iterable, Tuple
+from typing import Optional, Sequence, Dict, Iterable, Tuple, Callable
 from warnings import warn
 
 import torch
 import numpy as np
+from scipy.stats import rankdata
 
 from ..utils import chunk_grouped_data, validate_group_ids, validate_tensors, get_yhat_r
 
@@ -20,16 +21,15 @@ class ReSolver:
     passed here if this solver is not being used in a context where the precision matrices are optimized. If the
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
-    _prev_res_per_gf = None
-    _prev_re_offsets = None
+    iterative: bool
 
     def __init__(self,
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
                  design: dict,
+                 slow_start: bool = True,
                  prior_precisions: Optional[dict] = None,
-                 slow_start: Optional[float] = None,
                  verbose: bool = False):
 
         self.X, self.y = validate_tensors(X, y)
@@ -38,13 +38,14 @@ class ReSolver:
         self.prior_precisions = prior_precisions
         self.verbose = verbose
 
-        if slow_start is None:
-            slow_start = 2 * (len(self.design) - 1)
-        self.slow_start = slow_start
+        self.slow_start = len(design) * slow_start * self.iterative
+
+        self._prev_res_per_gf = None
+        self._prev_re_offsets = None
 
         # establish static kwargs:
         self.static_kwargs_per_gf = {}
-        for i, (gp, col_idx) in enumerate(self.design.items()):
+        for i, (gf, col_idx) in enumerate(self.design.items()):
             kwargs = {
                 'X': torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1),
                 'y': y,
@@ -54,7 +55,14 @@ class ReSolver:
             kwargs['XtX'] = torch.stack([
                 Xg.t() @ Xg for Xg, in chunk_grouped_data(kwargs['X'], group_ids=kwargs['group_ids'])
             ])
-            self.static_kwargs_per_gf[gp] = kwargs
+
+            if prior_precisions is not None:
+                XtX = kwargs['XtX']
+                pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
+                # TODO: avoid inverse
+                kwargs['Htild_inv'] = torch.inverse(-XtX - pp)
+
+            self.static_kwargs_per_gf[gf] = kwargs
 
     def __call__(self,
                  fe_offset: torch.Tensor,
@@ -95,6 +103,8 @@ class ReSolver:
             # print(self.history[-1])
 
             # check convergence:
+            if not self.iterative:
+                break
             if self._check_if_converged(reltol, min_iter):
                 break
                 # TODO: if only one grouping factor, drop converged groups
@@ -122,14 +132,70 @@ class ReSolver:
                    offset: torch.Tensor,
                    group_ids: Sequence,
                    prior_precision: torch.Tensor,
+                   Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
-                   **kwargs) -> torch.Tensor:
+                   **kwargs
+                   ) -> torch.Tensor:
         """
-        Update random-effects. For some solvers this might not be iterative given a single grouping factor
-        because a closed-form solution exists (e.g. gaussian); however, this is still an iterative `step` in the case of
-         multiple grouping-factors.
+        :param X: N*K model-mat
+        :param y: N vector
+        :param group_ids: N vector
+        :param offset: N vector of offsets for y (e.g. predictions from fixed-effects).
+        :param prior_precision: K*K precision matrix
+        :param Htild_inv: [Approximate] hessian, inverted.
+        :param prev_res: REs estimated from previous round
+        :return: A G*K tensor of REs
         """
+        num_groups = len(Htild_inv)
+        num_obs, num_res = X.shape
+
+        if prev_res is None:
+            prev_res = .01 * torch.randn(num_groups, num_res)
+
+        prior_precision = prior_precision.expand(num_groups, -1, -1)
+        group_ids_seq = rankdata(group_ids, method='dense') - 1
+
+        assert y.shape == offset.shape, (y.shape, offset.shape)
+        yoff = y - offset
+
+        # predictions:
+        prev_res_broad = prev_res[group_ids_seq]
+        yhat = (X * prev_res_broad).sum(1)
+        mu = self.ilink(yhat)
+
+        # grad:
+        group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
+        grad_els = self.calculate_grad(X, yoff, mu)
+        grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
+        grad = grad_no_pen + (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
+
+        # step:
+        step = self._calculate_step(
+            X=X, group_ids_seq=group_ids_seq, mu=mu, grad=grad, Htild_inv=Htild_inv, prior_precision=prior_precision
+        )
+        iter_ = len(self.history) + 1
+        step = step * (iter_ / (float(self.slow_start) + iter_))
+
+        return prev_res + step
+
+    @staticmethod
+    def ilink(x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
+
+    def calculate_grad(self,
+                       X: torch.Tensor,
+                       yoff: torch.Tensor,
+                       mu: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _calculate_step(self,
+                        X: torch.Tensor,
+                        group_ids_seq: np.ndarray,
+                        mu: torch.Tensor,
+                        grad: torch.Tensor,
+                        Htild_inv: torch.Tensor,
+                        prior_precision: torch.Tensor):
+        return (Htild_inv @ grad.unsqueeze(-1)).squeeze(-1)
 
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
         """
@@ -157,6 +223,14 @@ class ReSolver:
                 # call it on each optimizer step. we re-use the solutions from the last step as a warm start
                 kwargs['prev_res'] = self._prev_res_per_gf[gf]
                 kwargs['offset'] = kwargs['offset'] + self._prev_re_offsets[gf]
+
+            if prior_precisions is not None:
+                # TODO: use solve
+                # Htild_inv was not precomputed, compute it here
+                XtX = kwargs['XtX']
+                pp = prior_precisions[gf].expand(len(XtX), -1, -1)
+                kwargs['Htild_inv'] = torch.inverse(-XtX - pp)
+
         return kwargs_per_gf
 
     def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor) -> Optional[dict]:

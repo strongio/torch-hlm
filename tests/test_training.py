@@ -109,9 +109,9 @@ class TestTraining(unittest.TestCase):
             self.assertLess(wt[1:].abs().max(), .1)
 
     @parameterized.expand([
-        ('binary', 'cv'),
+        # ('binary', 'cv'),
         ('binary', None),
-        ('gaussian', 'cv'),
+        # ('gaussian', 'cv'),
         ('gaussian', None)
     ])
     def test_training_single_gf(self,
