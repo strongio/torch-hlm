@@ -162,10 +162,12 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         Xs_by_r = defaultdict(list)
         ys_by_r = defaultdict(list)
         Zs_by_r = defaultdict(list)
-        for Z_g, X_g, y_g in chunk_grouped_data(Z, X[:, self.ff_idx], y, group_ids=group_ids):
+        ws_by_r = defaultdict(list)
+        for Z_g, X_g, y_g, w_g in chunk_grouped_data(Z, X[:, self.ff_idx], y, weights, group_ids=group_ids):
             Zs_by_r[len(Z_g)].append(Z_g)
             ys_by_r[len(Z_g)].append(y_g)
             Xs_by_r[len(Z_g)].append(X_g)
+            ws_by_r[len(Z_g)].append(w_g)
 
         # compute log-prob per batch:
         re_dist = self.re_distribution(gf)
@@ -174,6 +176,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             ng = len(y_r)
             X_r = torch.stack(Xs_by_r[r])
             Z_r = torch.stack(Zs_by_r[r])
+            w_r = torch.stack(ws_by_r[r])
 
             # counter-intuitively, it's faster (for `backward()`) if we call this one per batch here (vs. calling for
             # the entire dataset above)
@@ -183,13 +186,13 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
 
             # mvnorm = LowRankMultivariateNormal(
             #     loc=loc,
-            #     cov_diag=self.residual_var * torch.eye(r).expand(ng, -1, -1),  # TODO: sample weights applied here?
+            #     cov_diag=self.residual_var * torch.eye(r).expand(ng, -1, -1)/w_r.unsqueeze(-1),
             #     cov_factor=Z_r,
             #     cov_factor_inner=re_dist.covariance_matrix.expand(ng, -1, -1),
             #     validate_args=False
             # )
             cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_r = (weights * self.residual_var * torch.eye(r)).expand(ng, -1, -1)
+            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1) / w_r.unsqueeze(-1)
             mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
 
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
