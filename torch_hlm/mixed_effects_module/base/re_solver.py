@@ -50,8 +50,7 @@ class ReSolver:
 
         self.slow_start = len(design) * slow_start * self.iterative
 
-        self._prev_res_per_gf = None
-        self._prev_re_offsets = None
+        self._warm_start = {}
 
         # establish static kwargs:
         self.static_kwargs_per_gf = {}
@@ -76,8 +75,7 @@ class ReSolver:
 
     def __call__(self,
                  fe_offset: torch.Tensor,
-                 prior_precisions: Optional[dict] = None,
-                 **kwargs) -> Dict[str, torch.Tensor]:
+                 prior_precisions: Optional[dict] = None) -> Dict[str, torch.Tensor]:
         """
         Solve the random effects.
 
@@ -96,7 +94,7 @@ class ReSolver:
             # take a step towards solving the random-effects:
             self.history.append({})
             for gf in self._shuffled_gfs():
-                self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf], **kwargs)
+                self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf])
 
             # check convergence:
             if not self.iterative:
@@ -126,14 +124,12 @@ class ReSolver:
                         warn(f"There are {unconverged:,} unconverged for {gf}, max-relchange {changes.max()}")
                 break
 
-        # save things for warm start next time:
         res_per_gf = self.history[-1]
-        self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
-        self._prev_re_offsets = {
-            k: v[1:].detach().sum(0) for k, v in self._recompute_offsets(fe_offset, res_per_gf).items()
+        self._warm_start = {
+            'res_per_gf': {k: v.detach() for k, v in res_per_gf.items()},
+            're_offsets': {k: v[1:].detach().sum(0) for k, v in self._recompute_offsets(fe_offset, res_per_gf).items()}
         }
 
-        # print(len(self.history))
         return res_per_gf
 
     def _shuffled_gfs(self) -> Sequence[str]:
@@ -166,7 +162,6 @@ class ReSolver:
 
         if prev_res is None:
             prev_res = .01 * torch.randn(num_groups, num_res)
-            print("\nCOLD START\n")
 
         prior_precision = prior_precision.expand(num_groups, -1, -1)
         group_ids_seq = rankdata(group_ids, method='dense') - 1
@@ -233,13 +228,13 @@ class ReSolver:
             kwargs['prev_res'] = None
             kwargs['offset'] = fe_offset
 
-            if self._prev_res_per_gf is not None:
+            if self._warm_start:
                 # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
                 # call it on each optimizer step. we re-use the solutions from the last step as a warm start
                 with torch.no_grad():
-                    kwargs['prev_res'] = self._prev_res_per_gf[gf]
+                    kwargs['prev_res'] = self._warm_start['res_per_gf'][gf]
                     kwargs['prev_res'] += (.01 * torch.randn_like(kwargs['prev_res']))
-                    kwargs['offset'] = kwargs['offset'] + self._prev_re_offsets[gf]
+                    kwargs['offset'] = kwargs['offset'] + self._warm_start['re_offsets'][gf]
                     kwargs['offset'] += (.01 * torch.randn_like(kwargs['offset']))
 
             if prior_precisions is not None:

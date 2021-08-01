@@ -363,9 +363,6 @@ class MixedEffectsModule(torch.nn.Module):
         :return: The loss
         """
 
-        _defaults = {'quantile_width': .20, 'n_splits': 3, 'random_state': None}
-        cv_config = {**_defaults, **(cv_config or {})}
-
         prior_precisions = self._get_prior_precisions(detach=False) if not self.fixed_cov else None
         log_probs = []
         for k, v in cache.items():
@@ -385,6 +382,10 @@ class MixedEffectsModule(torch.nn.Module):
         if log_probs:
             return -torch.sum(torch.stack(log_probs) / len(self.grouping_factors))
         else:
+            # TODO: choose breaks by over-weighting regions w/more uncertainty
+            _defaults = {'quantile_width': .20, 'n_splits': 3, 'random_state': None}
+            cv_config = {**_defaults, **(cv_config or {})}
+
             for gfi, gf in enumerate(self.grouping_factors):
                 # calculate quantiles:
                 _, counts = np.unique(group_ids[:, gfi], return_counts=True)
