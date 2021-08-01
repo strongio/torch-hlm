@@ -19,8 +19,10 @@ class MixedEffectsModel(BaseEstimator):
     :param fixeff_cols: Sequence of column-names of the fixed-effects in the model-matrix ``X``.
     :param raneff_design: A dictionary, whose key(s) are the names of grouping factors and whose values are
      column-names for random-effects of that grouping factor.
-    :param response: Column-name of response variable.
+    :param response_col: Column-name of response variable.
     :param response_type: Either 'binary' or 'gaussian'
+    :param weight_col: Optional column-name for weight-variable; will only be expected/used when response_col is
+     expected/used (e.g. at fit or in ``re_solve_data`` argument).
     :param fixed_effects_nn: A `torch.nn.Module`` that takes in the fixed-effects model-matrix and outputs predictions.
      Default is to use a single-layer Linear module.
     :param covariance: Can pass string with parameterization (see ``torch_hlm.covariance``, default is 'log_cholesky').
@@ -36,18 +38,25 @@ class MixedEffectsModel(BaseEstimator):
     def __init__(self,
                  fixeff_cols: Sequence[str],
                  raneff_design: Dict[str, Sequence[str]],
-                 response: str,
+                 response_col: str,
                  response_type: str = 'gaussian',
+                 weight_col: Optional[str] = None,
                  loss_type: Optional[str] = None,
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
                  covariance: Union[str, Dict[str, torch.Tensor]] = 'log_cholesky',
                  module_kwargs: Optional[dict] = None,
                  optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.LBFGS,
                  optimizer_kwargs: Optional[dict] = None):
+        # TODO: requirement of dataframe + response_col/weight_col API not very sklearn-ic. however,
+        #  while sklearn allows sample-aligned fit-params, in CV it will only pass them to fit not to score.
+        #  this is a problem for sample_weight and a big problem for group_ids.
+        #  see https://github.com/scikit-learn/scikit-learn/pull/13432
+
         self.fixeff_cols = fixeff_cols
         self.raneff_design = raneff_design
-        self.response = response
+        self.response_col = response_col
         self.response_type = response_type
+        self.weight_col = weight_col
         self.loss_type = loss_type
 
         self.fixed_effects_nn = fixed_effects_nn
@@ -76,7 +85,7 @@ class MixedEffectsModel(BaseEstimator):
     def grouping_factors(self) -> Sequence[str]:
         return list(self.raneff_design.keys())
 
-    def fit(self, X: pd.DataFrame, y=None, reset: str = 'warn', **kwargs) -> 'MixedEffectsModel':
+    def fit(self, X: pd.DataFrame, y=None, sample_weight=None, reset: str = 'warn', **kwargs) -> 'MixedEffectsModel':
         """
         Initialize and fit the underlying `MixedEffectsModule` until loss converges.
 
@@ -89,6 +98,8 @@ class MixedEffectsModel(BaseEstimator):
         """
         if y is not None:
             warn(f"Ignoring `y` passed to {type(self).__name__}.fit().")
+        if sample_weight is not None:
+            warn(f"Ignoring `sample_weight` passed to {type(self).__name__}.fit().")
 
         # initialize module:
         if reset or not self.module_:
@@ -97,15 +108,16 @@ class MixedEffectsModel(BaseEstimator):
             self._initialize_module()
 
         # build-model-mat:
-        X, y, group_ids = self.build_model_mats(X, expect_y=True)
+        X, y, group_ids, sample_weight = self.build_model_mats(X, expect_y=True)
 
-        self.partial_fit(X=X, y=y, group_ids=group_ids, max_num_epochs=None, **kwargs)
+        self.partial_fit(X=X, y=y, group_ids=group_ids, sample_weight=sample_weight, max_num_epochs=None, **kwargs)
         return self
 
     def partial_fit(self,
                     X: Union[np.ndarray, torch.Tensor],
                     y: Union[np.ndarray, torch.Tensor],
                     group_ids: Sequence,
+                    sample_weight: Optional[Union[np.ndarray, torch.Tensor]] = None,
                     stopping: Union['Stopping', tuple, dict] = ('params', .001),
                     callbacks: Collection[Callable] = (),
                     prog: bool = True,
@@ -118,6 +130,7 @@ class MixedEffectsModel(BaseEstimator):
         :param X: From ``build_model_mats()``
         :param y: From ``build_model_mats()``
         :param group_ids: From ``build_model_mats()``
+        :param sample_weight: TODO
         :param stopping: TODO
         :param callbacks: Functions to call on each epoch. Takes a single argument, the loss-history for this call to
          partial_fit.
@@ -136,6 +149,10 @@ class MixedEffectsModel(BaseEstimator):
 
         X = torch.as_tensor(X, **get_to_kwargs(self.module_))
         y = torch.as_tensor(y, **get_to_kwargs(self.module_))
+        if sample_weight is None:
+            sample_weight = torch.ones_like(y)
+        sample_weight = torch.as_tensor(sample_weight)
+        assert y.shape == sample_weight.shape
 
         if max_num_epochs is None:
             max_num_epochs = float('inf')
@@ -172,6 +189,7 @@ class MixedEffectsModel(BaseEstimator):
             X=X,
             y=y,
             group_ids=group_ids,
+            weights=sample_weight,
             optimizer=self.optimizer_,
             loss_type=self.loss_type,
             callbacks=_inner_callbacks,
@@ -208,17 +226,20 @@ class MixedEffectsModel(BaseEstimator):
 
     def build_model_mats(self,
                          df: pd.DataFrame,
-                         expect_y: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor], np.ndarray]:
+                         expect_y: bool = False
+                         ) -> Tuple[torch.Tensor, Optional[torch.Tensor], np.ndarray, Optional[torch.Tensor]]:
         X = torch.as_tensor(df[self.all_model_mat_cols].values, **get_to_kwargs(self.module_))
 
         group_ids = df[self.grouping_factors].values
 
-        y = None  # ok to omit in `predict`
-        if self.response in df.columns:
-            y = torch.as_tensor(df[self.response].values, **get_to_kwargs(self.module_))
-        elif expect_y:
-            raise ValueError(f"missing column '{self.response}'")
-        return X, y, group_ids
+        sample_weight = y = None  # ok to omit in `predict`
+        if self.response_col in df.columns:
+            y = torch.as_tensor(df[self.response_col].values, **get_to_kwargs(self.module_))
+        if self.weight_col and self.weight_col in df.columns:
+            sample_weight = torch.as_tensor(df[self.weight_col].values, **get_to_kwargs(self.module_))
+        if expect_y and y is None or (sample_weight is None and self.weight_col is not None):
+            raise ValueError(f"missing column '{self.response_col}'")
+        return X, y, group_ids, sample_weight
 
     def _initialize_module(self) -> MixedEffectsModule:
         if self.fixed_effects_nn is not None:
@@ -292,14 +313,9 @@ class MixedEffectsModel(BaseEstimator):
 
     @torch.no_grad()
     def _predict(self, X: pd.DataFrame, group_data: pd.DataFrame) -> np.ndarray:
-        X, _, group_ids = self.build_model_mats(X)
-        X_t, y_t, group_ids_t = self.build_model_mats(group_data)
-        if y_t is None:
-            raise RuntimeError(
-                f"`group_data` must include the response ('{self.response}'), so that random-effects can "
-                f"be computed."
-            )
-        pred = self.module_(X, group_ids=group_ids, re_solve_data=(X_t, y_t, group_ids_t))
+        X, _, group_ids, _ = self.build_model_mats(X, expect_y=False)
+        re_solve_data = self.build_model_mats(group_data, expect_y=True)
+        pred = self.module_(X, group_ids=group_ids, re_solve_data=re_solve_data)
         return pred.numpy()
 
 

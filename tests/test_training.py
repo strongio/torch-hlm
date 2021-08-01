@@ -71,7 +71,7 @@ class TestTraining(unittest.TestCase):
             fixeff_cols=[],
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design=raneff_design,
-            response='y',
+            response_col='y',
             covariance=covariance,
             loss_type='iid'
         )
@@ -170,7 +170,7 @@ class TestTraining(unittest.TestCase):
             fixeff_cols=predictors,
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design={'group': predictors},
-            response='y',
+            response_col='y',
             covariance=covariance,
             loss_type=loss_type
         )
