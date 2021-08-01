@@ -12,7 +12,6 @@ from .utils import validate_1d_like, validate_tensors, validate_group_ids, get_y
 
 class BinomialReSolver(ReSolver):
     iterative = True
-    _prev_res_per_gf = None
 
     def __init__(self,
                  X: torch.Tensor,
@@ -37,21 +36,16 @@ class BinomialReSolver(ReSolver):
             cg = len(self.design) == 1
         self.cg = cg
 
-    def __call__(self, *args, **kwargs) -> Dict[str, torch.Tensor]:
-        res_per_gf = super().__call__(*args, **kwargs)
-        self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
-        return res_per_gf
-
     @staticmethod
     def ilink(x: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(x)
 
     def calculate_grad(self,
                        X: torch.Tensor,
-                       yoff: torch.Tensor,
+                       y: torch.Tensor,
                        mu: torch.Tensor) -> torch.Tensor:
         _, num_res = X.shape
-        return X * (mu - yoff).unsqueeze(-1).expand(-1, num_res)
+        return X * (y - mu).unsqueeze(-1).expand(-1, num_res)
 
     def _calculate_step(self,
                         mu: torch.Tensor,
@@ -72,7 +66,7 @@ class BinomialReSolver(ReSolver):
             denom2 = ((prior_precision @ step.unsqueeze(-1)).permute(0, 2, 1) @ step.unsqueeze(-1))
             step_size = torch.zeros_like(numer)
             nz_grad_idx = np.where(numer != 0)  # when gradient is zero, we'll get 0./0. errors if we try to update
-            step_size[nz_grad_idx] = numer[nz_grad_idx] / -(denom1[nz_grad_idx] + denom2[nz_grad_idx].squeeze())
+            step_size[nz_grad_idx] = numer[nz_grad_idx] / (denom1[nz_grad_idx] + denom2[nz_grad_idx].squeeze())
             step_size = step_size.unsqueeze(-1)
         else:
             step_size = .25

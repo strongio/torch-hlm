@@ -30,13 +30,23 @@ class ReSolver:
                  design: dict,
                  slow_start: bool = True,
                  prior_precisions: Optional[dict] = None,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 max_iter: Optional[int] = None,
+                 min_iter: int = 5,
+                 reltol: float = .01):
 
         self.X, self.y = validate_tensors(X, y)
         self.group_ids = validate_group_ids(group_ids, num_grouping_factors=len(design))
         self.design = design
         self.prior_precisions = prior_precisions
         self.verbose = verbose
+
+        if max_iter is None:
+            max_iter = 200 * len(self.design)
+        assert max_iter > 0
+        self.max_iter = max_iter
+        self.min_iter = min_iter
+        self.reltol = reltol
 
         self.slow_start = len(design) * slow_start * self.iterative
 
@@ -60,15 +70,12 @@ class ReSolver:
                 XtX = kwargs['XtX']
                 pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
                 # TODO: avoid inverse
-                kwargs['Htild_inv'] = torch.inverse(-XtX - pp)
+                kwargs['Htild_inv'] = torch.inverse(XtX + pp)
 
             self.static_kwargs_per_gf[gf] = kwargs
 
     def __call__(self,
                  fe_offset: torch.Tensor,
-                 max_iter: Optional[int] = None,
-                 min_iter: int = 5,
-                 reltol: float = .01,
                  prior_precisions: Optional[dict] = None,
                  **kwargs) -> Dict[str, torch.Tensor]:
         """
@@ -81,37 +88,45 @@ class ReSolver:
         :param kwargs: Other keyword arguments to `solve_step`
         :return: A dictionary with random-effects for each grouping-factor
         """
-        if max_iter is None:
-            max_iter = 200 * len(self.design)
-        assert max_iter > 0
+
         kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
 
         self.history = []
         while True:
-            if len(self.history) >= max_iter:
-                if max_iter:
-                    for gf, changes in self._check_convergence():
-                        unconverged = (changes > reltol).sum()
-                        if unconverged:
-                            warn(f"There are {unconverged:,} unconverged for {gf}, max-relchange {changes.max()}")
-                break
-
             # take a step towards solving the random-effects:
             self.history.append({})
             for gf in self._shuffled_gfs():
                 self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf], **kwargs)
-            # print(self.history[-1])
 
             # check convergence:
             if not self.iterative:
                 break
-            if self._check_if_converged(reltol, min_iter):
-                break
-                # TODO: if only one grouping factor, drop converged groups
+
+            if len(self.history) > 1:
+                convergence = dict(self._check_convergence())
+                converged = len(self.history) >= self.min_iter
+                _verbose = {}
+                for gf, changes in convergence.items():
+                    # TODO: patience
+                    if (changes > self.reltol).any():
+                        converged = False
+                    _verbose[gf] = changes.max().item()
+                if self.verbose:
+                    print(f"{type(self).__name__} - Iter {len(self.history)} - Max. Relchanges {_verbose}")
+                if converged:
+                    break
 
             # recompute offset, etc:
             kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset)
 
+            if len(self.history) >= self.max_iter:
+                for gf, changes in convergence.items():
+                    unconverged = (changes > self.reltol).sum()
+                    if unconverged:
+                        warn(f"There are {unconverged:,} unconverged for {gf}, max-relchange {changes.max()}")
+                break
+
+        # save things for warm start next time:
         res_per_gf = self.history[-1]
         self._prev_res_per_gf = {k: v.detach() for k, v in res_per_gf.items()}
         self._prev_re_offsets = {
@@ -151,23 +166,23 @@ class ReSolver:
 
         if prev_res is None:
             prev_res = .01 * torch.randn(num_groups, num_res)
+            print("\nCOLD START\n")
 
         prior_precision = prior_precision.expand(num_groups, -1, -1)
         group_ids_seq = rankdata(group_ids, method='dense') - 1
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
-        yoff = y - offset
 
         # predictions:
         prev_res_broad = prev_res[group_ids_seq]
-        yhat = (X * prev_res_broad).sum(1)
+        yhat = (X * prev_res_broad).sum(1) + offset
         mu = self.ilink(yhat)
 
         # grad:
         group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
-        grad_els = self.calculate_grad(X, yoff, mu)
+        grad_els = self.calculate_grad(X, y, mu)  # X * (y - mu).unsqueeze(-1).expand(-1, num_res)
         grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
-        grad = grad_no_pen + (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
+        grad = grad_no_pen - (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
 
         # step:
         step = self._calculate_step(
@@ -184,7 +199,7 @@ class ReSolver:
 
     def calculate_grad(self,
                        X: torch.Tensor,
-                       yoff: torch.Tensor,
+                       y: torch.Tensor,
                        mu: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
@@ -221,15 +236,18 @@ class ReSolver:
             if self._prev_res_per_gf is not None:
                 # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
                 # call it on each optimizer step. we re-use the solutions from the last step as a warm start
-                kwargs['prev_res'] = self._prev_res_per_gf[gf]
-                kwargs['offset'] = kwargs['offset'] + self._prev_re_offsets[gf]
+                with torch.no_grad():
+                    kwargs['prev_res'] = self._prev_res_per_gf[gf]
+                    kwargs['prev_res'] += (.01 * torch.randn_like(kwargs['prev_res']))
+                    kwargs['offset'] = kwargs['offset'] + self._prev_re_offsets[gf]
+                    kwargs['offset'] += (.01 * torch.randn_like(kwargs['offset']))
 
             if prior_precisions is not None:
                 # TODO: use solve
                 # Htild_inv was not precomputed, compute it here
                 XtX = kwargs['XtX']
                 pp = prior_precisions[gf].expand(len(XtX), -1, -1)
-                kwargs['Htild_inv'] = torch.inverse(-XtX - pp)
+                kwargs['Htild_inv'] = torch.inverse(XtX + pp)
 
         return kwargs_per_gf
 
@@ -268,30 +286,12 @@ class ReSolver:
         return out
 
     @torch.no_grad()
-    def _check_if_converged(self, reltol: float, min_iter: int) -> bool:
-        if len(self.history) < 2:
-            return False
-        converged = len(self.history) >= min_iter
-        _verbose = {}
-        for gf, changes in self._check_convergence():
-            # TODO: patience
+    def _check_convergence(self) -> Iterable[Tuple[str, torch.Tensor]]:
+        assert len(self.history) > 1
+        for gf in self.design.keys():
+            current_res = self.history[-1][gf]
+            prev_res = self.history[-2][gf]
+            changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
             if torch.isinf(changes).any() or torch.isnan(changes).any():
                 raise RuntimeError("Convergence failed; nan/inf values")
-            if (changes > reltol).any():
-                converged = False
-                if not self.verbose:
-                    break
-            if self.verbose:
-                _verbose[gf] = changes.max().item()
-        if self.verbose:
-            print(f"{type(self).__name__} - Iter {len(self.history)} - Max. Relchanges {_verbose}")
-        return converged
-
-    def _check_convergence(self) -> Iterable[Tuple[str, torch.Tensor]]:
-        assert len(self.history) >= 2
-        with torch.no_grad():
-            for gf in self.design.keys():
-                current_res = self.history[-1][gf]
-                prev_res = self.history[-2][gf]
-                changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
-                yield gf, changes
+            yield gf, changes

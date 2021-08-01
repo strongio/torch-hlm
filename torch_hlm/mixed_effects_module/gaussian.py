@@ -54,10 +54,10 @@ class GaussianReSolver(ReSolver):
 
     def calculate_grad(self,
                        X: torch.Tensor,
-                       yoff: torch.Tensor,
+                       y: torch.Tensor,
                        mu: torch.Tensor) -> torch.Tensor:
         _, num_res = X.shape
-        return X * (mu - yoff).unsqueeze(-1).expand(-1, num_res)  # TODO X'A(y-p), A=[p(1-p)]/[p(1-m)]=1
+        return X * (y - mu).unsqueeze(-1).expand(-1, num_res)
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -86,8 +86,7 @@ class GaussianReSolver(ReSolver):
             num_groups = len(XtX)
             group_ids_seq = rankdata(group_ids, method='dense') - 1
             group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
-            yoff = y - offset
-            Xty_els = X * yoff.unsqueeze(1)  # TODO: sample_weights
+            Xty_els = X * (y - offset).unsqueeze(1)  # TODO: sample_weights
             Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
             return torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
 
@@ -132,9 +131,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                   X: torch.Tensor,
                   y: torch.Tensor,
                   group_ids: np.ndarray,
-                  cache: Optional[dict] = None,
+                  cache: dict,
                   loss_type: Optional[str] = None,
-                  skip_res: bool = False,
                   **kwargs):
         if loss_type == 'closed_form':
             return -self._get_gaussian_log_prob(X=X, y=y, group_ids=group_ids, **kwargs)
@@ -145,8 +143,9 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                                y: torch.Tensor,
                                group_ids: np.ndarray,
                                **kwargs) -> torch.Tensor:
-        if kwargs:
-            warn(f"Ignoring {set(kwargs)}")
+        extra = set(kwargs)
+        if extra:
+            warn(f"Ignoring {extra}")
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))

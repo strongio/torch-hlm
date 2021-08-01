@@ -309,6 +309,9 @@ class MixedEffectsModule(torch.nn.Module):
         if loss_type is None:
             loss_type = self.default_loss_type
 
+        if cache is None:
+            cache = {}
+
         loss = self._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, **kwargs)
 
         loss = loss + self._get_re_penalty()
@@ -321,9 +324,10 @@ class MixedEffectsModule(torch.nn.Module):
                   X: torch.Tensor,
                   y: torch.Tensor,
                   group_ids: np.ndarray,
-                  cache: Optional[dict] = None,
+                  cache: dict,
                   loss_type: Optional[str] = None,
                   **kwargs):
+
         if loss_type.startswith('cv'):
             return self._get_cv_loss(X=X, y=y, group_ids=group_ids, cache=cache, **kwargs)
         elif loss_type.startswith('iid'):
@@ -335,7 +339,7 @@ class MixedEffectsModule(torch.nn.Module):
                      X: torch.Tensor,
                      y: torch.Tensor,
                      group_ids: np.ndarray,
-                     cache: Optional[dict] = None,
+                     cache: dict,
                      cv_config: Optional[dict] = None,
                      **kwargs) -> torch.Tensor:
         """
@@ -358,12 +362,11 @@ class MixedEffectsModule(torch.nn.Module):
         :param kwargs: Other keyword args to pass to each ``ReSolver``.
         :return: The loss
         """
-        cache = cache or {}
 
         _defaults = {'quantile_width': .20, 'n_splits': 3, 'random_state': None}
         cv_config = {**_defaults, **(cv_config or {})}
 
-        if not any(k.startswith('split') for k in cache):
+        if not any(not isinstance(k, tuple) and isinstance(v, tuple) for k, v in cache.items()):
             for gfi, gf in enumerate(self.grouping_factors):
                 # calculate quantiles:
                 _, counts = np.unique(group_ids[:, gfi], return_counts=True)
@@ -412,7 +415,7 @@ class MixedEffectsModule(torch.nn.Module):
                       X: torch.Tensor,
                       y: torch.Tensor,
                       group_ids: np.ndarray,
-                      cache: Optional[dict] = None,
+                      cache: dict,
                       **kwargs) -> torch.Tensor:
         """
         If the re-cov is known and fixed, we can optimized fixed effects using likelihood of the posterior modes.
@@ -433,11 +436,8 @@ class MixedEffectsModule(torch.nn.Module):
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
 
-        cache = cache or {}
-        if 'solver' in cache:
-            solver = cache['solver']
-        else:
-            solver = self.solver_cls(
+        if 'solver' not in cache:
+            cache['solver'] = self.solver_cls(
                 X=X,
                 y=y,
                 group_ids=group_ids,
@@ -445,6 +445,7 @@ class MixedEffectsModule(torch.nn.Module):
                 prior_precisions=self._get_prior_precisions(detach=True),
                 **kwargs
             )
+        solver = cache['solver']
 
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
         res_per_gf = solver(fe_offset=yhat_f)

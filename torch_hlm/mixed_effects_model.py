@@ -110,7 +110,8 @@ class MixedEffectsModel(BaseEstimator):
                     callbacks: Collection[Callable] = (),
                     prog: bool = True,
                     max_num_epochs: Optional[int] = 1,
-                    clip_grad: Optional[float] = 2.0) -> 'MixedEffectsModel':
+                    clip_grad: Optional[float] = 2.0,
+                    **kwargs) -> 'MixedEffectsModel':
         """
         (Partially) fit the underlying ``MixedEffectsModule``.
 
@@ -173,7 +174,8 @@ class MixedEffectsModel(BaseEstimator):
             group_ids=group_ids,
             optimizer=self.optimizer_,
             loss_type=self.loss_type,
-            callbacks=_inner_callbacks
+            callbacks=_inner_callbacks,
+            **kwargs
         )
 
         callbacks = list(callbacks)

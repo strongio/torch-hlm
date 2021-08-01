@@ -109,10 +109,11 @@ class TestTraining(unittest.TestCase):
             self.assertLess(wt[1:].abs().max(), .1)
 
     @parameterized.expand([
-        # ('binary', 'cv'),
-        ('binary', None),
-        # ('gaussian', 'cv'),
-        ('gaussian', None)
+        ('binary', 'cv'),
+        ('binary', 'iid'),
+        ('gaussian', 'cv'),
+        ('gaussian', 'closed_form'),
+        ('gaussian', 'iid')
     ])
     def test_training_single_gf(self,
                                 response_type: str,
@@ -160,11 +161,11 @@ class TestTraining(unittest.TestCase):
         # FIT MODEL -----
         predictors = df_train.columns[df_train.columns.str.startswith('x')].tolist()
         covariance = 'log_cholesky'
-        if response_type.startswith('bin') and loss_type != 'cv':
+        if response_type in ('closed_form', 'cv'):
+            print("*will* optimize covariance")
+        else:
             print("will *not* optimize covariance")
             covariance = torch.as_tensor(df_raneff_true.drop(columns='group').cov().values)
-        else:
-            print("*will* optimize covariance")
         model = MixedEffectsModel(
             fixeff_cols=predictors,
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
@@ -173,7 +174,7 @@ class TestTraining(unittest.TestCase):
             covariance=covariance,
             loss_type=loss_type
         )
-        model.fit(df_train)  # , callbacks=[lambda x: print(model.module_.state_dict())])
+        model.fit(df_train)
 
         # COMPARE TRUE vs. EST -----
         with torch.no_grad():
