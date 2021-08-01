@@ -366,7 +366,25 @@ class MixedEffectsModule(torch.nn.Module):
         _defaults = {'quantile_width': .20, 'n_splits': 3, 'random_state': None}
         cv_config = {**_defaults, **(cv_config or {})}
 
-        if not any(not isinstance(k, tuple) and isinstance(v, tuple) for k, v in cache.items()):
+        prior_precisions = self._get_prior_precisions(detach=False) if not self.fixed_cov else None
+        log_probs = []
+        for k, v in cache.items():
+            if not isinstance(k, tuple) and isinstance(v, tuple):
+                continue
+            gf, q, _ = k
+            solver, test_idx = v
+            res_per_gf = solver(
+                fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
+                prior_precisions=prior_precisions
+            )
+            res_per_gf = pad_res_per_gf(
+                res_per_gf, group_ids1=solver.group_ids, group_ids2=group_ids[test_idx], verbose=solver.verbose
+            )
+            dist = self.predict_distribution_mode(X=X[test_idx], group_ids=group_ids[test_idx], res_per_gf=res_per_gf)
+            log_probs.append(dist.log_prob(y[test_idx]).sum())
+        if log_probs:
+            return -torch.sum(torch.stack(log_probs) / len(self.grouping_factors))
+        else:
             for gfi, gf in enumerate(self.grouping_factors):
                 # calculate quantiles:
                 _, counts = np.unique(group_ids[:, gfi], return_counts=True)
@@ -391,25 +409,14 @@ class MixedEffectsModule(torch.nn.Module):
                             **kwargs
                         )
                         cache[(gf, q, i)] = (solver, test_idx)
-
-        prior_precisions = self._get_prior_precisions(detach=False) if not self.fixed_cov else None
-
-        log_probs = []
-        for k, v in cache.items():
-            if not isinstance(k, tuple) and isinstance(v, tuple):
-                continue
-            gf, q, _ = k
-            solver, test_idx = v
-            res_per_gf = solver(
-                fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
-                prior_precisions=prior_precisions
+            return self._get_cv_loss(
+                X=X,
+                y=y,
+                group_ids=group_ids,
+                cache=cache,
+                cv_config=cv_config,
+                **kwargs
             )
-            res_per_gf = pad_res_per_gf(
-                res_per_gf, group_ids1=solver.group_ids, group_ids2=group_ids[test_idx], verbose=solver.verbose
-            )
-            dist = self.predict_distribution_mode(X=X[test_idx], group_ids=group_ids[test_idx], res_per_gf=res_per_gf)
-            log_probs.append(dist.log_prob(y[test_idx]).sum())
-        return -torch.sum(torch.stack(log_probs) / len(self.grouping_factors))
 
     def _get_iid_loss(self,
                       X: torch.Tensor,
