@@ -27,6 +27,7 @@ class ReSolver:
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
+                 weights: Optional[torch.Tensor],
                  design: dict,
                  slow_start: bool = True,
                  prior_precisions: Optional[dict] = None,
@@ -36,6 +37,10 @@ class ReSolver:
                  reltol: float = .01):
 
         self.X, self.y = validate_tensors(X, y)
+        if weights is None:
+            weights = torch.ones_like(self.y)
+        assert len(weights) == len(self.y)
+        self.weights = weights
         self.group_ids = validate_group_ids(group_ids, num_grouping_factors=len(design))
         self.design = design
         self.prior_precisions = prior_precisions
@@ -43,7 +48,8 @@ class ReSolver:
 
         if max_iter is None:
             max_iter = 200 * len(self.design)
-        assert max_iter > 0
+        assert max_iter >= min_iter
+        assert min_iter > 0
         self.max_iter = max_iter
         self.min_iter = min_iter
         self.reltol = reltol
@@ -58,11 +64,12 @@ class ReSolver:
             kwargs = {
                 'X': torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1),
                 'y': y,
-                'group_ids': group_ids[:, i]
+                'group_ids': group_ids[:, i],
+                'weights': weights
             }
-            # TODO: sample_weights
+
             kwargs['XtX'] = torch.stack([
-                Xg.t() @ Xg for Xg, in chunk_grouped_data(kwargs['X'], group_ids=kwargs['group_ids'])
+                wt * Xg.t() @ Xg for Xg, wt in chunk_grouped_data(kwargs['X'], weights, group_ids=kwargs['group_ids'])
             ])
 
             if prior_precisions is not None:
@@ -100,22 +107,21 @@ class ReSolver:
             if not self.iterative:
                 break
 
-            if len(self.history) > 1:
-                convergence = dict(self._check_convergence())
-                converged = len(self.history) >= self.min_iter
-                _verbose = {}
-                for gf, changes in convergence.items():
-                    # TODO: patience
-                    if (changes > self.reltol).any():
-                        converged = False
-                    _verbose[gf] = changes.max().item()
-                if self.verbose:
-                    print(f"{type(self).__name__} - Iter {len(self.history)} - Max. Relchanges {_verbose}")
-                if converged:
-                    break
+            convergence = dict(self._check_convergence())
+            converged = len(self.history) >= self.min_iter
+            _verbose = {}
+            for gf, changes in convergence.items():
+                # TODO: patience
+                if (changes > self.reltol).any():
+                    converged = False
+                _verbose[gf] = changes.max().item()
+            if self.verbose:
+                print(f"{type(self).__name__} - Iter {len(self.history)} - Max. Relchanges {_verbose}")
+            if converged:
+                break
 
             # recompute offset, etc:
-            kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset)
+            kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset, convergence=convergence)
 
             if len(self.history) >= self.max_iter:
                 for gf, changes in convergence.items():
@@ -140,8 +146,9 @@ class ReSolver:
     def solve_step(self,
                    X: torch.Tensor,
                    y: torch.Tensor,
+                   group_ids: np.ndarray,
+                   weights: torch.Tensor,
                    offset: torch.Tensor,
-                   group_ids: Sequence,
                    prior_precision: torch.Tensor,
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
@@ -175,13 +182,19 @@ class ReSolver:
 
         # grad:
         group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
-        grad_els = self.calculate_grad(X, y, mu)  # X * (y - mu).unsqueeze(-1).expand(-1, num_res)
+        grad_els = self._calculate_grad(X, y, mu) * weights.unsqueeze(-1)
         grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
         grad = grad_no_pen - (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
 
         # step:
         step = self._calculate_step(
-            X=X, group_ids_seq=group_ids_seq, mu=mu, grad=grad, Htild_inv=Htild_inv, prior_precision=prior_precision
+            X=X,
+            group_ids_seq=group_ids_seq,
+            mu=mu,
+            weights=weights,
+            grad=grad,
+            Htild_inv=Htild_inv,
+            prior_precision=prior_precision
         )
         iter_ = len(self.history) + 1
         step = step * (iter_ / (float(self.slow_start) + iter_))
@@ -192,19 +205,13 @@ class ReSolver:
     def ilink(x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def calculate_grad(self,
-                       X: torch.Tensor,
-                       y: torch.Tensor,
-                       mu: torch.Tensor) -> torch.Tensor:
+    def _calculate_grad(self,
+                        X: torch.Tensor,
+                        y: torch.Tensor,
+                        mu: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def _calculate_step(self,
-                        X: torch.Tensor,
-                        group_ids_seq: np.ndarray,
-                        mu: torch.Tensor,
-                        grad: torch.Tensor,
-                        Htild_inv: torch.Tensor,
-                        prior_precision: torch.Tensor):
+    def _calculate_step(self, grad: torch.Tensor, Htild_inv: torch.Tensor, **kwargs):
         return (Htild_inv @ grad.unsqueeze(-1)).squeeze(-1)
 
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
@@ -246,7 +253,10 @@ class ReSolver:
 
         return kwargs_per_gf
 
-    def _update_kwargs(self, kwargs_per_gf: dict, fe_offset: torch.Tensor) -> Optional[dict]:
+    def _update_kwargs(self,
+                       kwargs_per_gf: dict,
+                       fe_offset: torch.Tensor,
+                       convergence: dict) -> Optional[dict]:
         """
         Called on each iteration of the solver's __call__, this method recomputes the offset
 
@@ -256,13 +266,18 @@ class ReSolver:
         """
         assert self.history
         res_per_gf = self.history[-1]
+
         with torch.no_grad():  # TODO: in testing, `no_grad` was critical; unclear why
             new_offsets = self._recompute_offsets(fe_offset, res_per_gf)
+
         out = {}
         for gf in kwargs_per_gf.keys():
             out[gf] = kwargs_per_gf[gf].copy()
             out[gf]['offset'] = new_offsets[gf].sum(0)
             out[gf]['prev_res'] = res_per_gf[gf]
+            # if len(self.design)==1:
+            #     out[gf]['converged_mask'] = convergence[gf]
+
         return out
 
     def _recompute_offsets(self,
@@ -282,7 +297,8 @@ class ReSolver:
 
     @torch.no_grad()
     def _check_convergence(self) -> Iterable[Tuple[str, torch.Tensor]]:
-        assert len(self.history) > 1
+        if len(self.history) < 2:
+            return {}
         for gf in self.design.keys():
             current_res = self.history[-1][gf]
             prev_res = self.history[-2][gf]

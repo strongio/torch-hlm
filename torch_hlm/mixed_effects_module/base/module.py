@@ -144,7 +144,7 @@ class MixedEffectsModule(torch.nn.Module):
     def forward(self,
                 X: torch.Tensor,
                 group_ids: Sequence,
-                re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
+                re_solve_data: Optional[tuple] = None,
                 res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
                 quiet: bool = False) -> torch.Tensor:
         """
@@ -152,7 +152,7 @@ class MixedEffectsModule(torch.nn.Module):
         :param X: A 2D model-matrix Tensor
         :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
-        :param re_solve_data: A tuple of (X,y,group_ids) that will be used for establishing the random-effects.
+        :param re_solve_data: A tuple of (X,y,group_ids[,weights]) that will be used for establishing the ran-effects.
         :param res_per_gf: Instead of passing `re_solve_data` and having the module solve the random-effects per
         group, can alternatively pass these random-effects. This should be a dictionary whose keys are grouping-factors
         and whose values are tensors. Each tensor's row corresponds to the groups for that grouping factor, in sorted
@@ -205,7 +205,7 @@ class MixedEffectsModule(torch.nn.Module):
             self,
             X: torch.Tensor,
             group_ids: Sequence,
-            re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
+            re_solve_data: Optional[tuple] = None,
             res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
             **kwargs
     ) -> torch.distributions.Distribution:
@@ -215,7 +215,7 @@ class MixedEffectsModule(torch.nn.Module):
         :param X: Model-matrix
         :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
-        :param re_solve_data: A tuple of (X,y,group_ids) that will be used for establishing the random-effects.
+        :param re_solve_data: A tuple of (X,y,group_ids[,weights]) that will be used for establishing the ran-effects.
         :param res_per_gf: Instead of passing `re_solve_data` and having the module solve the random-effects per
         group, can alternatively pass these random-effects. This should be a dictionary whose keys are grouping-factors
         and whose values are tensors. Each tensor's row corresponds to the groups for that grouping factor, in sorted
@@ -229,6 +229,7 @@ class MixedEffectsModule(torch.nn.Module):
                 X: torch.Tensor,
                 y: torch.Tensor,
                 group_ids: Sequence,
+                weights: Optional[torch.Tensor] = None,
                 **kwargs) -> Dict[str, torch.Tensor]:
         """
         Get the random-effects.
@@ -236,6 +237,7 @@ class MixedEffectsModule(torch.nn.Module):
         :param y: A 1D target/response Tensor.
         :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+        :param weights: Optional sample-weights.
         :return: A dictionary with grouping-factors as keys and random-effects tensors as values. These tensors have
         rows corresponding to the sorted group_ids.
         """
@@ -245,6 +247,7 @@ class MixedEffectsModule(torch.nn.Module):
             X=X, y=y,
             group_ids=validate_group_ids(group_ids, len(self.grouping_factors)),
             design=self.rf_idx,
+            weights=weights,
             **kwargs
         )
         return solver(
@@ -272,6 +275,7 @@ class MixedEffectsModule(torch.nn.Module):
                  y: torch.Tensor,
                  group_ids: Sequence,
                  optimizer: torch.optim.Optimizer,
+                 weights: Optional[torch.Tensor] = None,
                  loss_type: Optional[str] = None,
                  callbacks: Collection[Callable] = (),
                  **kwargs) -> Iterator[float]:
@@ -285,7 +289,7 @@ class MixedEffectsModule(torch.nn.Module):
         # create the closure which returns the loss
         def closure():
             optimizer.zero_grad()
-            loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache, **kwargs)
+            loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache, weights=weights, **kwargs)
             if torch.isnan(loss):
                 raise RuntimeError("Encountered `nan` loss in training.")
             loss.backward()
@@ -301,6 +305,7 @@ class MixedEffectsModule(torch.nn.Module):
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
+                 weights: Optional[torch.Tensor] = None,
                  cache: Optional[dict] = None,
                  loss_type: Optional[str] = None,
                  reduce: bool = True,
@@ -312,7 +317,9 @@ class MixedEffectsModule(torch.nn.Module):
         if cache is None:
             cache = {}
 
-        loss = self._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, **kwargs)
+        loss = self._get_loss(
+            X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, weights=weights, **kwargs
+        )
 
         loss = loss + self._get_re_penalty()
 
@@ -324,14 +331,19 @@ class MixedEffectsModule(torch.nn.Module):
                   X: torch.Tensor,
                   y: torch.Tensor,
                   group_ids: np.ndarray,
+                  weights: Optional[torch.Tensor],
                   cache: dict,
                   loss_type: Optional[str] = None,
                   **kwargs):
 
         if loss_type.startswith('cv'):
-            return self._get_cv_loss(X=X, y=y, group_ids=group_ids, cache=cache, **kwargs)
+            return self._get_cv_loss(
+                X=X, y=y, group_ids=group_ids, cache=cache, weights=weights, **kwargs
+            )
         elif loss_type.startswith('iid'):
-            return self._get_iid_loss(X=X, y=y, group_ids=group_ids, cache=cache, **kwargs)
+            return self._get_iid_loss(
+                X=X, y=y, group_ids=group_ids, cache=cache, weights=weights, **kwargs
+            )
         else:
             raise NotImplementedError(f"{type(self).__name__} does not implement type={loss_type}")
 
@@ -339,6 +351,7 @@ class MixedEffectsModule(torch.nn.Module):
                      X: torch.Tensor,
                      y: torch.Tensor,
                      group_ids: np.ndarray,
+                     weights: Optional[torch.Tensor],
                      cache: dict,
                      cv_config: Optional[dict] = None,
                      **kwargs) -> torch.Tensor:
@@ -362,7 +375,9 @@ class MixedEffectsModule(torch.nn.Module):
         :param kwargs: Other keyword args to pass to each ``ReSolver``.
         :return: The loss
         """
-
+        if weights is None:
+            weights = torch.ones_like(y)
+        assert len(weights) == len(y)
         prior_precisions = self._get_prior_precisions(detach=False) if not self.fixed_cov else None
         log_probs = []
         for k, v in cache.items():
@@ -378,7 +393,8 @@ class MixedEffectsModule(torch.nn.Module):
                 res_per_gf, group_ids1=solver.group_ids, group_ids2=group_ids[test_idx], verbose=solver.verbose
             )
             dist = self.predict_distribution_mode(X=X[test_idx], group_ids=group_ids[test_idx], res_per_gf=res_per_gf)
-            log_probs.append(dist.log_prob(y[test_idx]).sum())
+            log_probs.append(torch.sum(dist.log_prob(y[test_idx]) * weights[test_idx]))
+
         if log_probs:
             return -torch.sum(torch.stack(log_probs) / len(self.grouping_factors))
         else:
@@ -405,6 +421,7 @@ class MixedEffectsModule(torch.nn.Module):
                             X=X[train_idx],
                             y=y[train_idx],
                             group_ids=group_ids[train_idx],
+                            weights=weights[train_idx],
                             design=self.rf_idx,
                             prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None,
                             **kwargs
@@ -414,6 +431,7 @@ class MixedEffectsModule(torch.nn.Module):
                 X=X,
                 y=y,
                 group_ids=group_ids,
+                weights=weights,
                 cache=cache,
                 cv_config=cv_config,
                 **kwargs
@@ -423,6 +441,7 @@ class MixedEffectsModule(torch.nn.Module):
                       X: torch.Tensor,
                       y: torch.Tensor,
                       group_ids: np.ndarray,
+                      weights: Optional[torch.Tensor],
                       cache: dict,
                       **kwargs) -> torch.Tensor:
         """
@@ -443,12 +462,16 @@ class MixedEffectsModule(torch.nn.Module):
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+        if weights is None:
+            weights = torch.ones_like(y)
+        assert len(weights) == len(y)
 
         if 'solver' not in cache:
             cache['solver'] = self.solver_cls(
                 X=X,
                 y=y,
                 group_ids=group_ids,
+                weights=weights,
                 design=self.rf_idx,
                 prior_precisions=self._get_prior_precisions(detach=True),
                 **kwargs
@@ -458,7 +481,7 @@ class MixedEffectsModule(torch.nn.Module):
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
         res_per_gf = solver(fe_offset=yhat_f)
         dist = self.predict_distribution_mode(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
-        log_prob_lik = dist.log_prob(y).sum()
+        log_prob_lik = torch.sum(dist.log_prob(y) * weights)
         return -log_prob_lik
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:

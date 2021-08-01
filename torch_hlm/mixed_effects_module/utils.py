@@ -51,9 +51,8 @@ def chunk_grouped_data(*tensors, group_ids: Sequence):
     return group_data
 
 
-def validate_tensors(*args) -> Iterator:
+def validate_tensors(*args: torch.Tensor) -> Iterator[torch.Tensor]:
     for arg in args:
-        # arg = torch.as_tensor(arg)
         if torch.isnan(arg).any():
             raise ValueError("`nans` in tensor")
         if torch.isinf(arg).any():

@@ -20,20 +20,11 @@ class GaussianReSolver(ReSolver):
                  X: torch.Tensor,
                  y: torch.Tensor,
                  group_ids: np.ndarray,
+                 weights: Optional[torch.Tensor],
                  design: dict,
-                 prior_precisions: Optional[dict] = None,
-                 slow_start: bool = True,
-                 verbose: bool = False):
+                 **kwargs):
         self.iterative = len(design) > 1
-
-        super().__init__(
-            X=X, y=y,
-            group_ids=group_ids,
-            design=design,
-            prior_precisions=prior_precisions,
-            slow_start=slow_start,
-            verbose=verbose
-        )
+        super().__init__(X=X, y=y, group_ids=group_ids, weights=weights, design=design, **kwargs)
 
     def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
         kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
@@ -52,10 +43,10 @@ class GaussianReSolver(ReSolver):
     def ilink(x: torch.Tensor) -> torch.Tensor:
         return x
 
-    def calculate_grad(self,
-                       X: torch.Tensor,
-                       y: torch.Tensor,
-                       mu: torch.Tensor) -> torch.Tensor:
+    def _calculate_grad(self,
+                        X: torch.Tensor,
+                        y: torch.Tensor,
+                        mu: torch.Tensor) -> torch.Tensor:
         _, num_res = X.shape
         return X * (y - mu).unsqueeze(-1).expand(-1, num_res)
 
@@ -63,7 +54,8 @@ class GaussianReSolver(ReSolver):
                    X: torch.Tensor,
                    y: torch.Tensor,
                    offset: torch.Tensor,
-                   group_ids: Sequence,
+                   group_ids: np.ndarray,
+                   weights: torch.Tensor,
                    prior_precision: torch.Tensor,
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
@@ -76,6 +68,7 @@ class GaussianReSolver(ReSolver):
                 y=y,
                 offset=offset,
                 group_ids=group_ids,
+                weights=weights,
                 prior_precision=prior_precision,
                 Htild_inv=Htild_inv,
                 prev_res=prev_res,
@@ -86,7 +79,8 @@ class GaussianReSolver(ReSolver):
             num_groups = len(XtX)
             group_ids_seq = rankdata(group_ids, method='dense') - 1
             group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
-            Xty_els = X * (y - offset).unsqueeze(1)  # TODO: sample_weights
+            assert y.shape == weights.shape
+            Xty_els = X * (y - offset).unsqueeze(1) * weights.unsqueeze(1)
             Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
             return torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
 
@@ -131,17 +125,21 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                   X: torch.Tensor,
                   y: torch.Tensor,
                   group_ids: np.ndarray,
+                  weights: Optional[torch.Tensor],
                   cache: dict,
                   loss_type: Optional[str] = None,
                   **kwargs):
         if loss_type == 'closed_form':
-            return -self._get_gaussian_log_prob(X=X, y=y, group_ids=group_ids, **kwargs)
-        return super()._get_loss(X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, **kwargs)
+            return -self._get_gaussian_log_prob(X=X, y=y, group_ids=group_ids, weights=weights, **kwargs)
+        return super()._get_loss(
+            X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, weights=weights, **kwargs
+        )
 
     def _get_gaussian_log_prob(self,
                                X: torch.Tensor,
                                y: torch.Tensor,
                                group_ids: np.ndarray,
+                               weights: Optional[torch.Tensor],
                                **kwargs) -> torch.Tensor:
         extra = set(kwargs)
         if extra:
@@ -149,6 +147,9 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+        if weights is None:
+            weights = torch.ones_like(y)
+        assert weights.shape == y.shape
 
         if len(self.grouping_factors) > 1:
             raise NotImplementedError
@@ -188,7 +189,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             #     validate_args=False
             # )
             cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1)
+            eps_r = (weights * self.residual_var * torch.eye(r)).expand(ng, -1, -1)
             mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
 
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
