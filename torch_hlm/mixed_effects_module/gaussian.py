@@ -26,19 +26,6 @@ class GaussianReSolver(ReSolver):
         self.iterative = len(design) > 1
         super().__init__(X=X, y=y, group_ids=group_ids, weights=weights, design=design, **kwargs)
 
-    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
-        kwargs_per_gf = super()._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
-        for gf, kwargs in kwargs_per_gf.items():
-
-            if prior_precisions is not None:
-                # TODO: use solve
-                # Htild_inv was not precomputed, compute it here
-                XtX = kwargs['XtX']
-                pp = prior_precisions[gf].expand(len(XtX), -1, -1)
-                kwargs['XtX_inv'] = .25 * torch.inverse(XtX + pp)
-
-        return kwargs_per_gf
-
     @staticmethod
     def ilink(x: torch.Tensor) -> torch.Tensor:
         return x
@@ -77,17 +64,17 @@ class GaussianReSolver(ReSolver):
             assert XtX is not None
             num_obs, num_res = X.shape
             num_groups = len(XtX)
-            group_ids_seq = rankdata(group_ids, method='dense') - 1
-            group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
+            group_ids_seq = torch.as_tensor(rankdata(group_ids, method='dense') - 1)
+            group_ids_broad = group_ids_seq.unsqueeze(-1).expand(-1, num_res)
             assert y.shape == weights.shape
-            Xty_els = X * (y - offset).unsqueeze(1) * weights.unsqueeze(1)
+            yoff = (y - offset)
+            Xty_els = X * yoff.unsqueeze(1) * weights.unsqueeze(1)
             Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
             return torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
 
 
 class GaussianMixedEffectsModule(MixedEffectsModule):
     solver_cls = GaussianReSolver
-    default_loss_type = 'closed_form'
 
     def __init__(self,
                  fixeff_features: Union[int, Sequence],
@@ -119,7 +106,12 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
 
     @property
     def residual_var(self) -> torch.Tensor:
-        return self._residual_std_dev_log.exp() ** 2
+        std = self._residual_std_dev_log.exp()
+        if torch.isclose(std, torch.zeros_like(std)):
+            eps = 0.001
+            warn(f"`{type(self)}().residual_var` near-zero, adding {eps ** 2}")
+            std = std + eps
+        return std ** 2
 
     def _get_loss(self,
                   X: torch.Tensor,
@@ -129,18 +121,24 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                   cache: dict,
                   loss_type: Optional[str] = None,
                   **kwargs):
-        if loss_type == 'closed_form':
-            return -self._get_gaussian_log_prob(X=X, y=y, group_ids=group_ids, weights=weights, **kwargs)
+        if loss_type == 'mvnorm':
+            return -self._get_mvnorm_log_prob(X=X, y=y, group_ids=group_ids, weights=weights, **kwargs)
         return super()._get_loss(
             X=X, y=y, group_ids=group_ids, cache=cache, loss_type=loss_type, weights=weights, **kwargs
         )
 
-    def _get_gaussian_log_prob(self,
-                               X: torch.Tensor,
-                               y: torch.Tensor,
-                               group_ids: np.ndarray,
-                               weights: Optional[torch.Tensor],
-                               **kwargs) -> torch.Tensor:
+    def _get_default_loss_type(self) -> str:
+        if len(self.rf_idx) == 1:
+            return 'mvnorm'
+        else:
+            return 'cv'
+
+    def _get_mvnorm_log_prob(self,
+                             X: torch.Tensor,
+                             y: torch.Tensor,
+                             group_ids: np.ndarray,
+                             weights: Optional[torch.Tensor],
+                             **kwargs) -> torch.Tensor:
         extra = set(kwargs)
         if extra:
             warn(f"Ignoring {extra}")
@@ -186,14 +184,14 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
 
             # mvnorm = LowRankMultivariateNormal(
             #     loc=loc,
-            #     cov_diag=self.residual_var * torch.eye(r).expand(ng, -1, -1)/w_r.unsqueeze(-1),
+            #     cov_diag=self.residual_var * torch.eye(r).expand(ng, -1, -1)/w_r.sqrt().unsqueeze(-1),
             #     cov_factor=Z_r,
             #     cov_factor_inner=re_dist.covariance_matrix.expand(ng, -1, -1),
             #     validate_args=False
             # )
             cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1) / w_r.unsqueeze(-1)
-            mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r)
+            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1) / w_r.sqrt().unsqueeze(-1)
+            mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r, validate_args=True)
 
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
 

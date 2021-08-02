@@ -28,7 +28,7 @@ def simulate_raneffects(num_groups: int,
         lr = np.random.randn(num_raneffects, int(np.sqrt(num_raneffects)))
         rf_cov = lr @ lr.T + .1 * np.eye(num_raneffects)
     if std_multi is None:
-        std_multi = [0.5] + [0.1] * (num_raneffects - 1)
+        std_multi = [0.25] + [0.1] * (num_raneffects - 1)
     if isinstance(std_multi, (int, float)):
         std_multi = [std_multi] * num_raneffects
     std_multi = np.diag(std_multi)

@@ -13,13 +13,15 @@ from scipy.special import expit
 from torch_hlm.mixed_effects_model import MixedEffectsModel
 from torch_hlm.simulate import simulate_raneffects
 
+SEED = 2021 - 8 - 1
+
 
 class TestTraining(unittest.TestCase):
 
     @parameterized.expand([
         ('gaussian', [0, 0]),
         ('binary', [0, 0])
-    ])
+    ], skip_on_empty=True)
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
@@ -27,8 +29,8 @@ class TestTraining(unittest.TestCase):
                                   noise: float = 1.0):
         print("\n`test_training_multiple_gf()` with config `{}`".
               format({k: v for k, v in locals().items() if k != 'self'}))
-        torch.manual_seed(0)
-        np.random.seed(43)
+        torch.manual_seed(SEED)
+        np.random.seed(SEED)
 
         # SIMULATE DATA -----
         df_train = []
@@ -37,8 +39,7 @@ class TestTraining(unittest.TestCase):
             df_train_g, df_raneff_true_g = simulate_raneffects(
                 num_groups=40,
                 obs_per_group=1,
-                num_raneffects=num_res_g + 1,
-                std_multi=.25
+                num_raneffects=num_res_g + 1
             )
             df_train.append(df_train_g.rename(columns={'y': f"g{i + 1}_y", 'group': f'g{i + 1}'}))
             df_raneff_true.append(df_raneff_true_g.assign(gf=f"g{i + 1}"))
@@ -96,8 +97,8 @@ class TestTraining(unittest.TestCase):
         df_corr = df_compare.groupby(['variable', 'gf'])[['true', 'est']].corr().reset_index([0, 1])
         try:
             # these are very sensitive to exact config (e.g. num_groups), may want to laxen
-            self.assertGreater(df_corr.loc['true', 'est'].min(), .6 if response_type.startswith('bin') else .8)
-            self.assertGreater(df_corr.loc['true', 'est'].mean(), .7 if response_type.startswith('bin') else .9)
+            self.assertGreater(df_corr.loc['true', 'est'].min(), .5 if response_type.startswith('bin') else .7)
+            self.assertGreater(df_corr.loc['true', 'est'].mean(), .6 if response_type.startswith('bin') else .8)
         except AssertionError:
             print(df_corr)
             raise
@@ -111,8 +112,9 @@ class TestTraining(unittest.TestCase):
     @parameterized.expand([
         ('binary', 'cv'),
         ('binary', 'iid'),
+        ('binomial', 'iid'),
         ('gaussian', 'cv'),
-        ('gaussian', 'closed_form'),
+        ('gaussian', 'mvnorm'),
         ('gaussian', 'iid')
     ])
     def test_training_single_gf(self,
@@ -125,8 +127,8 @@ class TestTraining(unittest.TestCase):
                                 noise: float = 1.0):
         print("\n`test_training_single_gf()` with config `{}`".
               format({k: v for k, v in locals().items() if k != 'self'}))
-        torch.manual_seed(43)
-        np.random.seed(43)
+        torch.manual_seed(SEED)
+        np.random.seed(SEED)
 
         # SIMULATE DATA -----
         df_train, df_raneff_true = simulate_raneffects(
@@ -138,10 +140,11 @@ class TestTraining(unittest.TestCase):
         assert num_res > 0  # we assume x1 exists in this sim
         df_train['y'] += (intercept + .5 * df_train['x1'])
 
-        if response_type == 'binary':
-            df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=1)
-        elif response_type == 'binomial':
-            raise NotImplementedError("TODO")
+        df_train['n'] = np.random.poisson(5, size=df_train.shape[0]) + 1
+        if response_type.startswith('bin'):
+            if response_type == 'binary':
+                df_train['n'] = 1
+            df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=df_train['n']) / df_train['n']
         else:
             df_train['y'] += noise * np.random.randn(df_train.shape[0])
 
@@ -161,7 +164,7 @@ class TestTraining(unittest.TestCase):
         # FIT MODEL -----
         predictors = df_train.columns[df_train.columns.str.startswith('x')].tolist()
         covariance = 'log_cholesky'
-        if response_type in ('closed_form', 'cv'):
+        if response_type in ('mvnorm', 'cv'):
             print("*will* optimize covariance")
         else:
             print("will *not* optimize covariance")
@@ -171,10 +174,11 @@ class TestTraining(unittest.TestCase):
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design={'group': predictors},
             response_col='y',
+            weight_col='n',
             covariance=covariance,
             loss_type=loss_type
         )
-        model.fit(df_train)
+        model.fit(df_train)  # , cg=False)
 
         # COMPARE TRUE vs. EST -----
         with torch.no_grad():
@@ -191,8 +195,8 @@ class TestTraining(unittest.TestCase):
         df_corr = df_compare.groupby('variable')[['true', 'est']].corr().reset_index(0)
         try:
             # these are very sensitive to exact config (e.g. num_groups), may want to laxen
-            self.assertGreater(df_corr.loc['true', 'est'].min(), .5 if response_type.startswith('bin') else .6)
-            self.assertGreater(df_corr.loc['true', 'est'].mean(), .6 if response_type.startswith('bin') else .8)
+            self.assertGreater(df_corr.loc['true', 'est'].min(), .35 if response_type.startswith('bin') else .45)
+            self.assertGreater(df_corr.loc['true', 'est'].mean(), .5 if response_type.startswith('bin') else .7)
         except AssertionError:
             print(df_corr)
             raise

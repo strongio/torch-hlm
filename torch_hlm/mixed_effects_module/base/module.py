@@ -312,7 +312,7 @@ class MixedEffectsModule(torch.nn.Module):
                  **kwargs) -> torch.Tensor:
 
         if loss_type is None:
-            loss_type = self.default_loss_type
+            loss_type = self._get_default_loss_type()
 
         if cache is None:
             cache = {}
@@ -327,6 +327,9 @@ class MixedEffectsModule(torch.nn.Module):
             loss = loss / len(X)
         return loss
 
+    def _get_default_loss_type(self) -> str:
+        raise NotImplementedError
+
     def _get_loss(self,
                   X: torch.Tensor,
                   y: torch.Tensor,
@@ -334,7 +337,7 @@ class MixedEffectsModule(torch.nn.Module):
                   weights: Optional[torch.Tensor],
                   cache: dict,
                   loss_type: Optional[str] = None,
-                  **kwargs):
+                  **kwargs) -> torch.Tensor:
 
         if loss_type.startswith('cv'):
             return self._get_cv_loss(

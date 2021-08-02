@@ -69,7 +69,7 @@ class ReSolver:
             }
 
             kwargs['XtX'] = torch.stack([
-                wt * Xg.t() @ Xg for Xg, wt in chunk_grouped_data(kwargs['X'], weights, group_ids=kwargs['group_ids'])
+                wg * Xg.t() @ Xg for Xg, wg in chunk_grouped_data(kwargs['X'], weights, group_ids=kwargs['group_ids'])
             ])
 
             if prior_precisions is not None:
@@ -171,7 +171,7 @@ class ReSolver:
             prev_res = .01 * torch.randn(num_groups, num_res)
 
         prior_precision = prior_precision.expand(num_groups, -1, -1)
-        group_ids_seq = rankdata(group_ids, method='dense') - 1
+        group_ids_seq = torch.as_tensor(rankdata(group_ids, method='dense') - 1)
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
 
@@ -181,8 +181,8 @@ class ReSolver:
         mu = self.ilink(yhat)
 
         # grad:
-        group_ids_broad = torch.tensor(group_ids_seq, dtype=torch.int64).unsqueeze(-1).expand(-1, num_res)
         grad_els = self._calculate_grad(X, y, mu) * weights.unsqueeze(-1)
+        group_ids_broad = group_ids_seq.unsqueeze(-1).expand(-1, num_res)
         grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
         grad = grad_no_pen - (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
 

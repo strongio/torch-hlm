@@ -1,13 +1,9 @@
-from typing import Sequence, Optional, Union, Dict, Tuple
+from typing import Sequence, Optional, Union, Tuple
 
 import torch
 import numpy as np
 
-from scipy.stats import rankdata
-
 from .base import MixedEffectsModule, ReSolver
-
-from .utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r
 
 
 class BinomialReSolver(ReSolver):
@@ -15,7 +11,6 @@ class BinomialReSolver(ReSolver):
 
     def __init__(self, *args, cg: Optional[bool] = None, **kwargs):
         super().__init__(*args, **kwargs)
-
         if cg is None:
             cg = len(self.design) == 1
         self.cg = cg
@@ -43,24 +38,29 @@ class BinomialReSolver(ReSolver):
 
         step = super(BinomialReSolver, self)._calculate_step(grad=grad, Htild_inv=Htild_inv)
 
+        var = (mu * (1. - mu)) * weights
         if self.cg:
             numer = (grad * step).sum(1)
-            var = (mu * (1. - mu)) / weights
             Xstep = (X * step[group_ids_seq]).sum(1)
-            denom1 = torch.zeros_like(numer).scatter_add(0, torch.tensor(group_ids_seq), (var * Xstep ** 2))
-            denom2 = ((prior_precision @ step.unsqueeze(-1)).permute(0, 2, 1) @ step.unsqueeze(-1))
+            denom1 = torch.zeros_like(numer).scatter_add(0, group_ids_seq, (var * Xstep ** 2))
+            denom2 = ((prior_precision @ step.unsqueeze(-1)).permute(0, 2, 1) @ step.unsqueeze(-1)).squeeze(-1)
             step_size = torch.zeros_like(numer)
             nz_grad_idx = np.where(numer != 0)  # when gradient is zero, we'll get 0./0. errors if we try to update
-            step_size[nz_grad_idx] = numer[nz_grad_idx] / (denom1[nz_grad_idx] + denom2[nz_grad_idx].squeeze())
+            step_size[nz_grad_idx] = numer[nz_grad_idx] / (denom1[nz_grad_idx] + denom2[nz_grad_idx].squeeze(-1))
             step_size = step_size.unsqueeze(-1)
         else:
-            step_size = .25
+            var_sums = torch.zeros(len(prior_precision)).scatter_add(0, group_ids_seq, var)
+            # TODO: memoize
+            group_counts = torch.zeros(len(prior_precision)).scatter_add(0, group_ids_seq, torch.ones_like(var))
+            step_size = (var_sums / group_counts).unsqueeze(-1)
         return step_size * step
 
 
 class BinomialMixedEffectsModule(MixedEffectsModule):
     solver_cls = BinomialReSolver
-    default_loss_type = 'iid'  # TODO
+
+    def _get_default_loss_type(self) -> str:
+        return 'cv'
 
     def predict_distribution_mode(
             self,
