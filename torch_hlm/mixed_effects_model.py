@@ -302,20 +302,24 @@ class MixedEffectsModel(BaseEstimator):
         self.optimizer_ = self.optimizer_cls(**optimizer_kwargs)
         return self.optimizer_
 
-    def predict(self, X: pd.DataFrame, group_data: pd.DataFrame) -> np.ndarray:
+    @torch.no_grad()
+    def predict(self, X: pd.DataFrame, group_data: pd.DataFrame, type: str = 'mean', **kwargs) -> np.ndarray:
         """
         :param X: A dataframe with the predictors for fixed and random effects, as well as the group-id column.
-        :param group_data: Historical data that will be used to obtain RE-estimates for each group, which will the be
+        :param group_data: Historical data that will be used to obtain RE-estimates for each group, which will then be
         used to generate predictions for X. Same format as X, except the response-column must also be included.
+        :param type: What type of prediction? This can be any attribute of the distribution being predicted. For
+         example, for a binomial model, we will generate a ``torch.distributions.Binomial`` object, and the
+         prediction output from this method will be an attribue of that (e.g. type='logits' would get the predicted
+         logits). Default 'mean'.
         :return: An ndarray of predictions
         """
-        return self._predict(X=X, group_data=group_data)
-
-    @torch.no_grad()
-    def _predict(self, X: pd.DataFrame, group_data: pd.DataFrame) -> np.ndarray:
         X, _, group_ids, _ = self.build_model_mats(X, expect_y=False)
         re_solve_data = self.build_model_mats(group_data, expect_y=True)
-        pred = self.module_(X, group_ids=group_ids, re_solve_data=re_solve_data)
+        dist = self.module_.predict_distribution_mode(X, group_ids=group_ids, re_solve_data=re_solve_data)
+        pred = getattr(dist, type)
+        if callable(pred):
+            pred = pred(**kwargs)
         return pred.numpy()
 
 
