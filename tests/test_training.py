@@ -134,8 +134,7 @@ class TestTraining(unittest.TestCase):
         df_train, df_raneff_true = simulate_raneffects(
             num_groups=num_groups,
             obs_per_group=int(num_obs_per_group * 1.25),
-            num_raneffects=num_res + 1,
-            # std_multi=[0.2] + [0.1] * NUM_RES
+            num_raneffects=num_res + 1
         )
         assert num_res > 0  # we assume x1 exists in this sim
         df_train['y'] += (intercept + .5 * df_train['x1'])
@@ -178,7 +177,7 @@ class TestTraining(unittest.TestCase):
             covariance=covariance,
             loss_type=loss_type
         )
-        model.fit(df_train)  # , cg=False)
+        model.fit(df_train)
 
         # COMPARE TRUE vs. EST -----
         with torch.no_grad():
