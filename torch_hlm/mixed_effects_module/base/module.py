@@ -387,16 +387,18 @@ class MixedEffectsModule(torch.nn.Module):
             if not isinstance(k, tuple) and isinstance(v, tuple):
                 continue
             gf, q, _ = k
-            solver, test_idx = v
+            solver, test_kwargs = v
             res_per_gf = solver(
                 fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
                 prior_precisions=prior_precisions
             )
             res_per_gf = pad_res_per_gf(
-                res_per_gf, group_ids1=solver.group_ids, group_ids2=group_ids[test_idx], verbose=solver.verbose
+                res_per_gf, group_ids1=solver.group_ids, group_ids2=test_kwargs['group_ids'], verbose=solver.verbose
             )
-            dist = self.predict_distribution_mode(X=X[test_idx], group_ids=group_ids[test_idx], res_per_gf=res_per_gf)
-            log_probs.append(torch.sum(dist.log_prob(y[test_idx]) * weights[test_idx]))
+            dist = self.predict_distribution_mode(
+                X=test_kwargs['X'], group_ids=test_kwargs['group_ids'], res_per_gf=res_per_gf
+            )
+            log_probs.append(torch.sum(dist.log_prob(test_kwargs['y']) * test_kwargs['weights']))
 
         if log_probs:
             return -torch.sum(torch.stack(log_probs) / len(self.grouping_factors))
@@ -405,13 +407,20 @@ class MixedEffectsModule(torch.nn.Module):
             _defaults = {'quantile_width': .20, 'n_splits': 3, 'random_state': None}
             cv_config = {**_defaults, **(cv_config or {})}
 
+            slice_kwargs = {'X': X, 'y': y, 'group_ids': group_ids, 'weights': weights}
+
             for gfi, gf in enumerate(self.grouping_factors):
                 # calculate quantiles:
-                _, counts = np.unique(group_ids[:, gfi], return_counts=True)
-                q = max(1 / np.median(counts), cv_config['quantile_width'])
-                assert q <= .5, f"Cannot do cv on this dataset, median group-size for {gf} is <2"
-                quantiles = np.arange(q, 1., q)
-                if 1 - quantiles[-1] < q / 2:
+                _, inverse, counts = np.unique(group_ids, return_counts=True, return_inverse=True)
+                min_n = 1 / cv_config['quantile_width']
+                enough = counts >= min_n
+                enough_mask = enough[inverse]
+                if not enough.all():
+                    print(f"CV will drop {enough.sum():,} groups with n < {min_n}")
+                gf_slice_kwargs = {k: v[enough_mask] for k, v in slice_kwargs.items()}
+
+                quantiles = np.arange(cv_config['quantile_width'], 1., cv_config['quantile_width'])
+                if 1 - quantiles[-1] < cv_config['quantile_width'] / 2:
                     quantiles = quantiles[0:-1]
 
                 # create splits + solvers for each:
@@ -419,17 +428,15 @@ class MixedEffectsModule(torch.nn.Module):
                     splitter = StratifiedShuffleSplit(
                         n_splits=cv_config['n_splits'], test_size=q, random_state=cv_config['random_state']
                     )
-                    for i, (train_idx, test_idx) in enumerate(splitter.split(X=X, y=group_ids[:, gfi]), 1):
+                    for i, (train_idx, test_idx) in enumerate(
+                            splitter.split(X=gf_slice_kwargs['X'], y=gf_slice_kwargs['group_ids'][:, gfi]), 1):
                         solver = self.solver_cls(
-                            X=X[train_idx],
-                            y=y[train_idx],
-                            group_ids=group_ids[train_idx],
-                            weights=weights[train_idx],
+                            **{k: v[train_idx] for k, v in gf_slice_kwargs.items()},
                             design=self.rf_idx,
                             prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None,
                             **kwargs
                         )
-                        cache[(gf, q, i)] = (solver, test_idx)
+                        cache[(gf, q, i)] = (solver, {k: v[test_idx] for k, v in gf_slice_kwargs.items()})
             return self._get_cv_loss(
                 X=X,
                 y=y,
