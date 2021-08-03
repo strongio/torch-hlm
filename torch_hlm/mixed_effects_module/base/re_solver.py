@@ -80,6 +80,45 @@ class ReSolver:
 
             self.static_kwargs_per_gf[gf] = kwargs
 
+    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
+        """
+        Called at the start of the solver's __call__, this XXX
+
+        :param fe_offset: XXX
+        :param prior_precisions: XXX
+        :return:
+        """
+
+        if prior_precisions is None:
+            assert self.prior_precisions is not None
+            # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
+            prior_precisions = self.prior_precisions
+
+        kwargs_per_gf = {}
+        for gf in self.design.keys():
+            kwargs = kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
+            kwargs['prior_precision'] = prior_precisions[gf]
+            kwargs['prev_res'] = None
+            kwargs['offset'] = fe_offset
+
+            if self._warm_start:
+                # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
+                # call it on each optimizer step. we re-use the solutions from the last step as a warm start
+                with torch.no_grad():
+                    kwargs['prev_res'] = self._warm_start['res_per_gf'][gf]
+                    kwargs['prev_res'] += (.01 * torch.randn_like(kwargs['prev_res']))
+                    kwargs['offset'] = kwargs['offset'] + self._warm_start['re_offsets'][gf]
+                    kwargs['offset'] += (.01 * torch.randn_like(kwargs['offset']))
+
+            if prior_precisions is not None:
+                # TODO: use solve
+                # Htild_inv was not precomputed, compute it here
+                XtX = kwargs['XtX']
+                pp = prior_precisions[gf].expand(len(XtX), -1, -1)
+                kwargs['Htild_inv'] = torch.inverse(XtX + pp)
+
+        return kwargs_per_gf
+
     def __call__(self,
                  fe_offset: torch.Tensor,
                  prior_precisions: Optional[dict] = None) -> Dict[str, torch.Tensor]:
@@ -230,45 +269,6 @@ class ReSolver:
 
     def _calculate_step(self, grad: torch.Tensor, Htild_inv: torch.Tensor, **kwargs):
         return (Htild_inv @ grad.unsqueeze(-1)).squeeze(-1)
-
-    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
-        """
-        Called at the start of the solver's __call__, this XXX
-
-        :param fe_offset: XXX
-        :param prior_precisions: XXX
-        :return:
-        """
-
-        if prior_precisions is None:
-            assert self.prior_precisions is not None
-            # if we are not optimizing covariance, can avoid passing prior-precisions on each iter
-            prior_precisions = self.prior_precisions
-
-        kwargs_per_gf = {}
-        for gf in self.design.keys():
-            kwargs = kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
-            kwargs['prior_precision'] = prior_precisions[gf]
-            kwargs['prev_res'] = None
-            kwargs['offset'] = fe_offset
-
-            if self._warm_start:
-                # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
-                # call it on each optimizer step. we re-use the solutions from the last step as a warm start
-                with torch.no_grad():
-                    kwargs['prev_res'] = self._warm_start['res_per_gf'][gf]
-                    kwargs['prev_res'] += (.01 * torch.randn_like(kwargs['prev_res']))
-                    kwargs['offset'] = kwargs['offset'] + self._warm_start['re_offsets'][gf]
-                    kwargs['offset'] += (.01 * torch.randn_like(kwargs['offset']))
-
-            if prior_precisions is not None:
-                # TODO: use solve
-                # Htild_inv was not precomputed, compute it here
-                XtX = kwargs['XtX']
-                pp = prior_precisions[gf].expand(len(XtX), -1, -1)
-                kwargs['Htild_inv'] = torch.inverse(XtX + pp)
-
-        return kwargs_per_gf
 
     def _update_kwargs(self,
                        kwargs_per_gf: dict,
