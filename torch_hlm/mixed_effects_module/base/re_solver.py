@@ -270,6 +270,35 @@ class ReSolver:
     def _calculate_step(self, grad: torch.Tensor, Htild_inv: torch.Tensor, **kwargs):
         return (Htild_inv @ grad.unsqueeze(-1)).squeeze(-1)
 
+    def _get_hessians(self,
+                      fe_offset: torch.Tensor,
+                      prior_precisions: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
+        if prior_precisions is None:
+            if self.prior_precisions is None:
+                raise ValueError("Please pass `prior_precisions`")
+            prior_precisions = self.prior_precisions
+        out = {}
+        for gfi, (gf, col_idx) in enumerate(self.design.items()):
+            group_ids_seq = torch.as_tensor(rankdata(self.group_ids[:, gfi], method='dense') - 1)
+            col_idx = self.design[gf]
+            X = torch.cat([torch.ones((len(self.X), 1)), self.X[:, col_idx]], 1)
+            res_broad = self.history[-1][gf][group_ids_seq]
+            yhat = (X * res_broad).sum(1) + fe_offset + self._warm_start['re_offsets'][gf]
+            mu = self.ilink(yhat)
+            pp = prior_precisions[gf]
+            out[gf] = torch.stack([
+                self._get_hessian(Xg, wg, mug) + pp for gi, (Xg, wg, mug)
+                in enumerate(chunk_grouped_data(X, self.weights, mu, group_ids=group_ids_seq))
+            ])
+        return out
+
+    @staticmethod
+    def _get_hessian(
+            X: torch.Tensor,
+            weights: torch.Tensor,
+            mu: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
     def _update_kwargs(self,
                        kwargs_per_gf: dict,
                        fe_offset: torch.Tensor,

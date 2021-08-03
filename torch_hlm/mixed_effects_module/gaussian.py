@@ -75,6 +75,13 @@ class GaussianReSolver(ReSolver):
             Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
             return torch.solve(Xty.unsqueeze(-1), XtX + prior_precision)[0].squeeze(-1)
 
+    @staticmethod
+    def _get_hessian(
+            X: torch.Tensor,
+            weights: torch.Tensor,
+            mu: torch.Tensor) -> torch.Tensor:
+        return weights * X.t() @ X
+
 
 class GaussianMixedEffectsModule(MixedEffectsModule):
     solver_cls = GaussianReSolver

@@ -55,6 +55,14 @@ class BinomialReSolver(ReSolver):
             step_size = (var_sums / group_counts).unsqueeze(-1)
         return step_size * step
 
+    @staticmethod
+    def _get_hessian(
+            X: torch.Tensor,
+            weights: torch.Tensor,
+            mu: torch.Tensor) -> torch.Tensor:
+        var = (mu * (1. - mu))
+        return var * weights * X.t() @ X
+
 
 class BinomialMixedEffectsModule(MixedEffectsModule):
     solver_cls = BinomialReSolver
