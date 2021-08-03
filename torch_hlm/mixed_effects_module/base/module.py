@@ -164,7 +164,7 @@ class MixedEffectsModule(torch.nn.Module):
         if res_per_gf is None:
             if re_solve_data is None:
                 raise TypeError("Must pass one of `re_solve_data`, `res_per_gf`; got neither.")
-            *_, rs_group_ids = re_solve_data
+            _, _, rs_group_ids, *_ = re_solve_data
             group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
             rs_group_ids = validate_group_ids(rs_group_ids, num_grouping_factors=len(self.grouping_factors))
 
