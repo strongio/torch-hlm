@@ -66,7 +66,7 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
             self,
             X: torch.Tensor,
             group_ids: Sequence,
-            re_solve_data: Optional[Tuple[torch.Tensor, torch.Tensor, Sequence]] = None,
+            re_solve_data: Optional[tuple] = None,
             res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
             **kwargs
     ) -> torch.distributions.Distribution:
