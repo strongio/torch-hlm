@@ -79,6 +79,10 @@ class TestTraining(unittest.TestCase):
         model.fit(df_train)
 
         # COMPARE TRUE vs. EST -----
+        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .13 * len(num_res))
+        wt = model.module_.fixed_effects_nn.weight.squeeze()
+        assert not len(wt)  # haven't set up unit-tests for this
+
         with torch.no_grad():
             res_per_g = model.module_.get_res(*model.build_model_mats(df_train))
             df_raneff_est = []
@@ -102,12 +106,6 @@ class TestTraining(unittest.TestCase):
         except AssertionError:
             print(df_corr)
             raise
-
-        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .13 * len(num_res))
-        wt = model.module_.fixed_effects_nn.weight.squeeze()
-        if len(wt):
-            self.assertLess(abs(wt[0] - .5), .1)
-            self.assertLess(wt[1:].abs().max(), .1)
 
     @parameterized.expand([
         ('binary', 'cv'),
@@ -180,6 +178,11 @@ class TestTraining(unittest.TestCase):
         model.fit(df_train)
 
         # COMPARE TRUE vs. EST -----
+        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .1)
+        wt = model.module_.fixed_effects_nn.weight.squeeze()
+        self.assertLess(abs(wt[0] - .5), .1)
+        self.assertLess(wt[1:].abs().max(), .1)
+
         with torch.no_grad():
             df_raneff_est = pd.DataFrame(model.module_.get_res(*model.build_model_mats(df_train))['group'].numpy(),
                                          columns=df_raneff_true.columns[0:-1])
@@ -190,7 +193,6 @@ class TestTraining(unittest.TestCase):
             pivot(index=['group', 'variable'], columns='type', values='value'). \
             reset_index()
         df_compare.columns.name = None
-
         df_corr = df_compare.groupby('variable')[['true', 'est']].corr().reset_index(0)
         try:
             # these are very sensitive to exact config (e.g. num_groups), may want to laxen
@@ -199,8 +201,3 @@ class TestTraining(unittest.TestCase):
         except AssertionError:
             print(df_corr)
             raise
-
-        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .1)
-        wt = model.module_.fixed_effects_nn.weight.squeeze()
-        self.assertLess(abs(wt[0] - .5), .1)
-        self.assertLess(wt[1:].abs().max(), .1)
