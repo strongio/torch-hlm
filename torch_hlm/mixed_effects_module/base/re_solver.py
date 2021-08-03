@@ -62,10 +62,10 @@ class ReSolver:
         self.static_kwargs_per_gf = {}
         for i, (gf, col_idx) in enumerate(self.design.items()):
             kwargs = {
-                'X': torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1),
-                'y': y,
-                'group_ids': group_ids[:, i],
-                'weights': weights
+                'X': torch.cat([torch.ones((len(self.X), 1)), self.X[:, col_idx]], 1),
+                'y': self.y,
+                'group_ids': self.group_ids[:, i],
+                'weights': self.weights
             }
 
             kwargs['XtX'] = torch.stack([

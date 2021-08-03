@@ -163,7 +163,7 @@ class TestTraining(unittest.TestCase):
         # FIT MODEL -----
         predictors = df_train.columns[df_train.columns.str.startswith('x')].tolist()
         covariance = 'log_cholesky'
-        if response_type in ('mvnorm', 'cv'):
+        if loss_type in ('mvnorm', 'cv'):
             print("*will* optimize covariance")
         else:
             print("will *not* optimize covariance")
