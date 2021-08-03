@@ -392,11 +392,11 @@ class MixedEffectsModule(torch.nn.Module):
                 fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
                 prior_precisions=prior_precisions
             )
-            res_per_gf = pad_res_per_gf(
+            res_per_gf_padded = pad_res_per_gf(
                 res_per_gf, group_ids1=solver.group_ids, group_ids2=test_kwargs['group_ids'], verbose=solver.verbose
             )
             dist = self.predict_distribution_mode(
-                X=test_kwargs['X'], group_ids=test_kwargs['group_ids'], res_per_gf=res_per_gf
+                X=test_kwargs['X'], group_ids=test_kwargs['group_ids'], res_per_gf=res_per_gf_padded
             )
             log_probs.append(torch.sum(dist.log_prob(test_kwargs['y']) * test_kwargs['weights']))
 
@@ -426,7 +426,7 @@ class MixedEffectsModule(torch.nn.Module):
                 # create splits + solvers for each:
                 for q in quantiles:
                     splitter = StratifiedShuffleSplit(
-                        n_splits=cv_config['n_splits'], test_size=q, random_state=cv_config['random_state']
+                        n_splits=cv_config['n_splits'], train_size=q, random_state=cv_config['random_state']
                     )
                     for i, (train_idx, test_idx) in enumerate(
                             splitter.split(X=gf_slice_kwargs['X'], y=gf_slice_kwargs['group_ids'][:, gfi]), 1):
