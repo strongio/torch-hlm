@@ -118,7 +118,7 @@ class MixedEffectsModel(BaseEstimator):
                     y: Union[np.ndarray, torch.Tensor],
                     group_ids: Sequence,
                     sample_weight: Optional[Union[np.ndarray, torch.Tensor]] = None,
-                    stopping: Union['Stopping', tuple, dict] = ('params', .001),
+                    stopping: Union['Stopping', tuple, dict] = (.001,),
                     callbacks: Collection[Callable] = (),
                     prog: bool = True,
                     max_num_epochs: Optional[int] = 1,
@@ -131,7 +131,8 @@ class MixedEffectsModel(BaseEstimator):
         :param y: From ``build_model_mats()``
         :param group_ids: From ``build_model_mats()``
         :param sample_weight: TODO
-        :param stopping: TODO
+        :param stopping: args/kwargs to pass to :class:`torch_hlm.mixed_effects_model.Stopping` (e.g. ``(.01,)`` would
+         use abstol of .01).
         :param callbacks: Functions to call on each epoch. Takes a single argument, the loss-history for this call to
          partial_fit.
         :param prog: TODO
@@ -214,6 +215,7 @@ class MixedEffectsModel(BaseEstimator):
                 raise e
 
             if stopping(epoch_loss):
+                print(f"Convergence reached: {stopping.get_info()}")
                 break
 
             epoch += 1
@@ -325,16 +327,19 @@ class MixedEffectsModel(BaseEstimator):
 
 class Stopping:
     def __init__(self,
-                 type: str = 'params',
                  abstol: Optional[float] = .001,
                  reltol: Optional[float] = None,
+                 patience: int = 2,
+                 type: str = 'params_and_loss',
                  optimizer: Optional[torch.optim.Optimizer] = None):
 
-        self.type = 'params' if type.startswith('param') else 'loss'
+        self.type = type
         self.optimizer = optimizer
         self.abstol = abstol
         self.reltol = reltol
         self.old_value = None
+        self.patience = patience
+        self._patience_counter = 0
         self._info = (float('nan'), min(self.abstol or float('inf'), self.reltol or float('inf')))
 
     @torch.no_grad()
@@ -343,15 +348,15 @@ class Stopping:
 
     @torch.no_grad()
     def get_new_value(self, loss: Optional[float]):
-        if self.type == 'params':
+        flat_params = []
+        if 'params' in self.type:
             assert self.optimizer is not None
-            flat_params = []
             for g in self.optimizer.param_groups:
                 for p in g['params']:
                     flat_params.append(p.view(-1))
-            return torch.cat(flat_params)
-        else:
-            return torch.as_tensor([loss])
+        if 'loss' in self.type:
+            flat_params.append(torch.as_tensor([loss]))
+        return torch.cat(flat_params)
 
     @torch.no_grad()
     def __call__(self, loss: Optional[float]) -> bool:
@@ -365,6 +370,7 @@ class Stopping:
         assert not (self.abstol is None and self.reltol is None)
         if self.abstol is not None and (abs_change > self.abstol).any():
             self._info = (abs_change.max(), self.abstol)
+            self._patience_counter = 0
             return False
         if self.reltol is None:
             self._info = (abs_change.max(), self.abstol)  # even if we've converged, print up to date info
@@ -372,5 +378,7 @@ class Stopping:
             rel_change = abs_change / old_value.abs()
             self._info = (rel_change.max(), self.reltol)
             if (rel_change > self.reltol).any():
+                self._patience_counter = 0
                 return False
-        return True
+        self._patience_counter += 1
+        return self._patience_counter >= self.patience
