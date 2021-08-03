@@ -152,6 +152,7 @@ class ReSolver:
                    prior_precision: torch.Tensor,
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
+                   converged_mask: Optional[np.ndarray] = None,
                    **kwargs
                    ) -> torch.Tensor:
         """
@@ -172,6 +173,22 @@ class ReSolver:
 
         prior_precision = prior_precision.expand(num_groups, -1, -1)
         group_ids_seq = torch.as_tensor(rankdata(group_ids, method='dense') - 1)
+
+        if converged_mask is not None and converged_mask.any():
+            out = prev_res.clone()
+            converged_mask2 = converged_mask[group_ids_seq]
+            out[~converged_mask] = self.solve_step(
+                X=X[~converged_mask2],
+                y=y[~converged_mask2],
+                group_ids=group_ids[~converged_mask2],
+                weights=weights[~converged_mask2],
+                offset=offset[~converged_mask2],
+                prior_precision=prior_precision[~converged_mask],
+                Htild_inv=Htild_inv[~converged_mask],
+                prev_res=prev_res[~converged_mask],
+                **kwargs
+            )
+            return out
 
         assert y.shape == offset.shape, (y.shape, offset.shape)
 
@@ -275,8 +292,8 @@ class ReSolver:
             out[gf] = kwargs_per_gf[gf].copy()
             out[gf]['offset'] = new_offsets[gf].sum(0)
             out[gf]['prev_res'] = res_per_gf[gf]
-            # if len(self.design)==1:
-            #     out[gf]['converged_mask'] = convergence[gf]
+            if len(self.design) == 1 and gf in convergence:
+                out[gf]['converged_mask'] = convergence[gf] <= self.reltol
 
         return out
 
