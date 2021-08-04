@@ -69,6 +69,4 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
         return 'iid'
 
     def _forward_to_distribution(self, pred: torch.Tensor, **kwargs) -> torch.distributions.Distribution:
-        if 'weights' in kwargs:
-            kwargs['total_count'] = kwargs.pop('weights')
         return torch.distributions.Binomial(logits=pred, **kwargs)

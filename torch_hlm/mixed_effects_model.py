@@ -296,7 +296,7 @@ class MixedEffectsModel(BaseEstimator):
     def _initialize_optimizer(self) -> torch.optim.Optimizer:
         optimizer_kwargs = {'lr': .001}
         if issubclass(self.optimizer_cls, torch.optim.LBFGS):
-            optimizer_kwargs.update(lr=.10, max_eval=12)
+            optimizer_kwargs.update(lr=.25, max_eval=12, line_search_fn='strong_wolfe')
         optimizer_kwargs.update(self.optimizer_kwargs or {})
         optimizer_kwargs['params'] = [p for p in self.module_.parameters() if p.requires_grad]
         self.optimizer_ = self.optimizer_cls(**optimizer_kwargs)

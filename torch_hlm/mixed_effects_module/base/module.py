@@ -360,104 +360,6 @@ class MixedEffectsModule(torch.nn.Module):
         else:
             raise NotImplementedError(f"{type(self).__name__} does not implement type={loss_type}")
 
-    def _get_cv_loss(self,
-                     X: torch.Tensor,
-                     y: torch.Tensor,
-                     group_ids: np.ndarray,
-                     weights: Optional[torch.Tensor],
-                     cache: dict,
-                     cv_config: Optional[dict] = None,
-                     **kwargs) -> torch.Tensor:
-        """
-        For many types of mixed-effects models, finding the posterior modes is tractable but evaluating the full
-        likelihood is not. One option afforded by autograd is to optimize the covariance based on iid likelihood on
-        *holdout* data. This method involves generating splits within each group of varying sizes, and optimizing the
-        parameters so minimize loss on the test-splits.
-
-        :param X: A 2D model-matrix Tensor
-        :param y: A 1D target/response Tensor.
-        :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
-        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
-        :param cache: Dictionary of cached objects that don't need to be re-created each call (e.g. ``ReSolver``)
-        :param cv_config: A dictionary with config for the cross-validation. This is experimental and subject to
-        change, current options are: `n_splits` for the number of splits per each round of stratified splitting (default
-         3); `quantile_width` for controlling the number of rounds of splits, and the sizes of the train/test-split on
-         each (e.g. default of .20 will create perform 4 rounds of stratified splitting train/test with proportions
-        `[.20/.80, .40/.60, .60/.40, .80/.20]`); and `random_state` (default None) for controlling the random-state of
-         the splitter.
-        :param kwargs: Other keyword args to pass to each ``ReSolver``.
-        :return: The loss
-        """
-        if weights is None:
-            weights = torch.ones_like(y)
-        assert len(weights) == len(y)
-        prior_precisions = self._get_prior_precisions(detach=False) if not self.fixed_cov else None
-        log_probs = []
-        for k, v in cache.items():
-            if not isinstance(k, tuple) and isinstance(v, tuple):
-                continue
-            gf, q, _ = k
-            solver, test_kwargs = v
-
-            fe_offset = validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx]))
-
-            res_per_gf = solver(fe_offset=fe_offset, prior_precisions=prior_precisions)
-
-            res_per_gf_padded = pad_res_per_gf(
-                res_per_gf, group_ids1=solver.group_ids, group_ids2=test_kwargs['group_ids'], verbose=solver.verbose
-            )
-            dist = self.predict_distribution_mode(
-                X=test_kwargs['X'], group_ids=test_kwargs['group_ids'], res_per_gf=res_per_gf_padded
-            )
-            # TODO: confirm this is equivalent to Binomial(total_count=weights)
-            log_probs.append(torch.sum(dist.log_prob(test_kwargs['y']) * test_kwargs['weights']))
-
-        if log_probs:
-            return -torch.sum(torch.stack(log_probs) / len(self.grouping_factors))
-        else:
-            # TODO: choose breaks by over-weighting regions w/more uncertainty
-            _defaults = {'quantile_width': .20, 'n_splits': 3, 'random_state': None}
-            cv_config = {**_defaults, **(cv_config or {})}
-
-            slice_kwargs = {'X': X, 'y': y, 'group_ids': group_ids, 'weights': weights}
-
-            for gfi, gf in enumerate(self.grouping_factors):
-                # calculate quantiles:
-                _, inverse, counts = np.unique(group_ids[:, gfi], return_counts=True, return_inverse=True)
-                min_n = 1 / cv_config['quantile_width']
-                enough = counts >= min_n
-                enough_mask = enough[inverse]
-                if not enough.all():
-                    print(f"CV will drop {enough.sum():,} groups with n < {min_n}")
-                gf_slice_kwargs = {k: v[enough_mask] for k, v in slice_kwargs.items()}
-
-                quantiles = np.arange(cv_config['quantile_width'], 1., cv_config['quantile_width'])
-                if 1 - quantiles[-1] < cv_config['quantile_width'] / 2:
-                    quantiles = quantiles[0:-1]
-
-                # create splits + solvers for each:
-                for q in quantiles:
-                    splitter = StratifiedShuffleSplit(
-                        n_splits=cv_config['n_splits'], train_size=q, random_state=cv_config['random_state']
-                    )
-                    for i, (train_idx, test_idx) in enumerate(
-                            splitter.split(X=gf_slice_kwargs['X'], y=gf_slice_kwargs['group_ids'][:, gfi]), 1):
-                        solver = self.solver_cls(
-                            **{k: v[train_idx] for k, v in gf_slice_kwargs.items()},
-                            design=self.rf_idx,
-                            prior_precisions=self._get_prior_precisions(detach=True) if self.fixed_cov else None,
-                            **kwargs
-                        )
-                        cache[(gf, q, i)] = (solver, {k: v[test_idx] for k, v in gf_slice_kwargs.items()})
-            return self._get_cv_loss(
-                X=X,
-                y=y,
-                group_ids=group_ids,
-                weights=weights,
-                cache=cache,
-                cv_config=cv_config,
-                **kwargs
-            )
 
     def _get_mc_loss(self,
                      X: torch.Tensor,
@@ -468,7 +370,6 @@ class MixedEffectsModule(torch.nn.Module):
                      nsim: Optional[int] = None,
                      **kwargs) -> torch.Tensor:
         X, y = validate_tensors(X, y)
-        group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
         if weights is None:
             weights = torch.ones_like(y)
         assert len(weights) == len(y)
@@ -492,8 +393,13 @@ class MixedEffectsModule(torch.nn.Module):
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
         yhat_samples = yhat_f.unsqueeze(-1) + torch.sum(torch.stack(yhats, 1), 1)
 
-        dist = self._forward_to_distribution(yhat_samples)
-        log_probs = dist.log_prob(y.unsqueeze(-1)).exp().mean(-1).log() * weights
+        # TODO: cleaner approach
+        try:
+            dist = self._forward_to_distribution(yhat_samples, total_count=weights.unsqueeze(-1), validate_args=False)
+            log_probs = dist.log_prob((y * weights).unsqueeze(-1)).exp().mean(-1).log()
+        except TypeError:
+            dist = self._forward_to_distribution(yhat_samples, validate_args=False)
+            log_probs = dist.log_prob(y.unsqueeze(-1)).exp().mean(-1).log() * weights
         return -log_probs.sum()
 
     def _get_iid_loss(self,
@@ -539,10 +445,15 @@ class MixedEffectsModule(torch.nn.Module):
 
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
         res_per_gf = solver(fe_offset=yhat_f)
-        dist = self.predict_distribution_mode(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
-        # TODO: confirm this is equivalent to Binomial(total_count=weights)
-        log_prob_lik = torch.sum(dist.log_prob(y) * weights)
-        return -log_prob_lik
+        pred = self.forward(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+        # TODO: cleaner approach
+        try:
+            dist = self._forward_to_distribution(pred, total_count=weights, validate_args=False)
+            log_probs = dist.log_prob(y * weights)
+        except TypeError:
+            dist = self._forward_to_distribution(pred, validate_args=False)
+            log_probs = dist.log_prob(y) * weights
+        return -log_probs.sum()
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:
         """
