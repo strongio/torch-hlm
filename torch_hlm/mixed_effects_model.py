@@ -249,7 +249,6 @@ class MixedEffectsModel(BaseEstimator):
         if isinstance(self.covariance, str):
             covariance_arg = self.covariance
         else:
-            covariance_arg = 'log_cholesky'
             if len(self.grouping_factors) == 1 and not isinstance(self.covariance, dict):
                 self.covariance = {self.grouping_factors[0]: self.covariance}
             from torch_hlm.covariance import Covariance
@@ -257,7 +256,6 @@ class MixedEffectsModel(BaseEstimator):
                 k: Covariance.from_name('log_cholesky', rank=len(v)).set(torch.as_tensor(v))
                 for k, v in self.covariance.items()
             }
-            # self.covariance = {k: torch.as_tensor(v) for k, v in self.covariance.items()}
 
         module_kwargs = {
             'fixeff_features': [],

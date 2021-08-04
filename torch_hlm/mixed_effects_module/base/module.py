@@ -223,6 +223,12 @@ class MixedEffectsModule(torch.nn.Module):
         :param kwargs: Other arguments to pass to the distribution's init.
         :return: A ``torch.distributions.Distribution``
         """
+        if 'validate_args' not in kwargs:
+            kwargs['validate_args'] = False
+        pred = self(X=X, group_ids=group_ids, re_solve_data=re_solve_data, res_per_gf=res_per_gf)
+        return self._forward_to_distribution(pred, **kwargs)
+
+    def _forward_to_distribution(self, pred: torch.Tensor, **kwargs) -> torch.distributions.Distribution:
         raise NotImplementedError
 
     def get_res(self,
@@ -347,6 +353,10 @@ class MixedEffectsModule(torch.nn.Module):
             return self._get_iid_loss(
                 X=X, y=y, group_ids=group_ids, cache=cache, weights=weights, **kwargs
             )
+        elif loss_type.startswith('mc'):
+            return self._get_mc_loss(
+                X=X, y=y, group_ids=group_ids, cache=cache, weights=weights, **kwargs
+            )
         else:
             raise NotImplementedError(f"{type(self).__name__} does not implement type={loss_type}")
 
@@ -388,16 +398,18 @@ class MixedEffectsModule(torch.nn.Module):
                 continue
             gf, q, _ = k
             solver, test_kwargs = v
-            res_per_gf = solver(
-                fe_offset=validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx])),
-                prior_precisions=prior_precisions
-            )
+
+            fe_offset = validate_1d_like(self.fixed_effects_nn(solver.X[:, self.ff_idx]))
+
+            res_per_gf = solver(fe_offset=fe_offset, prior_precisions=prior_precisions)
+
             res_per_gf_padded = pad_res_per_gf(
                 res_per_gf, group_ids1=solver.group_ids, group_ids2=test_kwargs['group_ids'], verbose=solver.verbose
             )
             dist = self.predict_distribution_mode(
                 X=test_kwargs['X'], group_ids=test_kwargs['group_ids'], res_per_gf=res_per_gf_padded
             )
+            # TODO: confirm this is equivalent to Binomial(total_count=weights)
             log_probs.append(torch.sum(dist.log_prob(test_kwargs['y']) * test_kwargs['weights']))
 
         if log_probs:
@@ -447,6 +459,43 @@ class MixedEffectsModule(torch.nn.Module):
                 **kwargs
             )
 
+    def _get_mc_loss(self,
+                     X: torch.Tensor,
+                     y: torch.Tensor,
+                     group_ids: np.ndarray,
+                     weights: Optional[torch.Tensor],
+                     cache: dict,
+                     nsim: Optional[int] = None,
+                     **kwargs) -> torch.Tensor:
+        X, y = validate_tensors(X, y)
+        group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
+        if weights is None:
+            weights = torch.ones_like(y)
+        assert len(weights) == len(y)
+
+        if nsim is None:
+            # TODO
+            nsim = int(max(200 + 100 * (len(col_idx) + 1) ** 1.5 for gf, col_idx in self.rf_idx.items()))
+
+        yhats = []
+        for gf, col_idx in self.rf_idx.items():
+            chol = self.re_distribution(gf).scale_tril
+            num_res = len(chol)
+
+            if f'white_noise_{gf}' not in cache:
+                cache[f'white_noise_{gf}'] = torch.randn((nsim, num_res), dtype=chol.dtype, device=chol.device)
+            sampled_res = (cache[f'white_noise_{gf}'] @ chol).T
+
+            Xr = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
+            yhats.append((Xr.unsqueeze(-1) * sampled_res.unsqueeze(0)).sum(1))
+
+        yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
+        yhat_samples = yhat_f.unsqueeze(-1) + torch.sum(torch.stack(yhats, 1), 1)
+
+        dist = self._forward_to_distribution(yhat_samples)
+        log_probs = dist.log_prob(y.unsqueeze(-1)).exp().mean(-1).log() * weights
+        return -log_probs.sum()
+
     def _get_iid_loss(self,
                       X: torch.Tensor,
                       y: torch.Tensor,
@@ -491,6 +540,7 @@ class MixedEffectsModule(torch.nn.Module):
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
         res_per_gf = solver(fe_offset=yhat_f)
         dist = self.predict_distribution_mode(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
+        # TODO: confirm this is equivalent to Binomial(total_count=weights)
         log_prob_lik = torch.sum(dist.log_prob(y) * weights)
         return -log_prob_lik
 

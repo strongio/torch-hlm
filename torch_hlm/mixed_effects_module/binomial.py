@@ -66,17 +66,9 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
     solver_cls = BinomialReSolver
 
     def _get_default_loss_type(self) -> str:
-        return 'cv'
+        return 'iid'
 
-    def predict_distribution_mode(
-            self,
-            X: torch.Tensor,
-            group_ids: Sequence,
-            re_solve_data: Optional[tuple] = None,
-            res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
-            **kwargs
-    ) -> torch.distributions.Distribution:
-        if 'validate_args' not in kwargs:
-            kwargs['validate_args'] = False
-        pred = self(X=X, group_ids=group_ids, re_solve_data=re_solve_data, res_per_gf=res_per_gf)
+    def _forward_to_distribution(self, pred: torch.Tensor, **kwargs) -> torch.distributions.Distribution:
+        if 'weights' in kwargs:
+            kwargs['total_count'] = kwargs.pop('weights')
         return torch.distributions.Binomial(logits=pred, **kwargs)

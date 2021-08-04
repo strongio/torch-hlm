@@ -103,18 +103,8 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         )
         self._residual_std_dev_log = torch.nn.Parameter(.01 * torch.randn(1))
 
-    def predict_distribution_mode(
-            self,
-            X: torch.Tensor,
-            group_ids: Sequence,
-            re_solve_data: Optional[tuple] = None,
-            res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
-            **kwargs
-    ) -> torch.distributions.Distribution:
-        if 'validate_args' not in kwargs:
-            kwargs['validate_args'] = False
-        pred = self(X=X, group_ids=group_ids, re_solve_data=re_solve_data, res_per_gf=res_per_gf)
-        return torch.distributions.Normal(loc=pred, scale=self.residual_var ** .5)
+    def _forward_to_distribution(self, pred: torch.Tensor, **kwargs) -> torch.distributions.Distribution:
+        return torch.distributions.Normal(loc=pred, scale=self.residual_var ** .5, **kwargs)
 
     @property
     def residual_var(self) -> torch.Tensor:
@@ -143,7 +133,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         if len(self.rf_idx) == 1:
             return 'mvnorm'
         else:
-            return 'cv'
+            return 'mc'
 
     def _get_mvnorm_log_prob(self,
                              X: torch.Tensor,
