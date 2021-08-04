@@ -76,7 +76,7 @@ class ReSolver:
             if prior_precisions is not None:
                 XtX = kwargs['XtX']
                 pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
-                # TODO: avoid inverse
+                # TODO: use torch.cholesky -> cholesky_solve
                 kwargs['Htild_inv'] = torch.inverse(XtX + pp)
 
             self.static_kwargs_per_gf[gf] = kwargs
@@ -111,7 +111,7 @@ class ReSolver:
                 # kwargs['offset'] = fe_offset
 
             if 'Htild_inv' not in kwargs:
-                # TODO: use solve
+                # TODO: use torch.cholesky -> cholesky_solve
                 # Htild_inv was not precomputed, compute it here
                 XtX = kwargs['XtX']
                 pp = prior_precisions[gf].expand(len(XtX), -1, -1)
@@ -146,15 +146,16 @@ class ReSolver:
         while True:
             history.append({})
             iter_ = len(history)
-            for gf in self._shuffled_gfs():
+            for gf in self.grouping_factors:
                 gf_kwargs = kwargs_per_gf[gf]
+
                 # slow start:
                 gf_kwargs['dampen'] = (iter_ / (float(self.slow_start) + iter_))
 
                 # recompute offset:
                 gf_kwargs['offset'] = torch.sum(torch.stack([v for gf2, v in offsets.items() if gf2 != gf], 1), 1)
 
-                # solve step:
+                # solve for gf:
                 history[-1][gf] = gf_res = gf_kwargs['prev_res'] = self.solve_step(**gf_kwargs)
                 if not self.iterative or len(self.design) == 1:
                     continue
@@ -175,16 +176,19 @@ class ReSolver:
                 _verbose[gf] = changes.max().item()
             if self.verbose:
                 print(f"{type(self).__name__} - Iter {iter_} - Max. Relchanges {_verbose}")
-
             if converged:
                 break
-
-            if iter_ >= self.max_iter:
+            elif iter_ >= self.max_iter:
                 for gf, changes in convergence.items():
                     unconverged = (changes > self.reltol).sum()
                     if unconverged:
                         warn(f"There are {unconverged:,} unconverged for {gf}, max-relchange {changes.max()}")
                 break
+
+            # if only a single grouping factor, can mask converged:
+            if len(self.grouping_factors) == 1:
+                gf = self.grouping_factors[0]
+                kwargs_per_gf[gf]['converged_mask'] = convergence.get(gf) <= self.reltol
 
         res_per_gf = history[-1]
         self._warm_start = {
@@ -195,10 +199,6 @@ class ReSolver:
 
         return res_per_gf
 
-    def _shuffled_gfs(self) -> Sequence[str]:
-        gfs = list(self.design.keys())
-        shuffle(gfs)
-        return gfs
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -286,9 +286,12 @@ class ReSolver:
                         mu: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
+    @property
+    def grouping_factors(self) -> Sequence[str]:
+        return list(self.design)
+
     def _calculate_step(self, grad: torch.Tensor, Htild_inv: torch.Tensor, **kwargs):
         return (Htild_inv @ grad.unsqueeze(-1)).squeeze(-1)
-
 
     @staticmethod
     def _get_hessian(
@@ -301,7 +304,7 @@ class ReSolver:
     def _check_convergence(self, history: Sequence[dict]) -> Iterable[Tuple[str, torch.Tensor]]:
         if len(history) < 2:
             return {}
-        for gf in self.design.keys():
+        for gf in history[-1].keys():
             current_res = history[-1][gf]
             prev_res = history[-2][gf]
             changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
