@@ -74,7 +74,7 @@ class TestTraining(unittest.TestCase):
             raneff_design=raneff_design,
             response_col='y',
             covariance=covariance,
-            loss_type='iid'
+            loss_type='cv'
         )
         model.fit(df_train)
 
@@ -92,7 +92,6 @@ class TestTraining(unittest.TestCase):
                 )
                 df_raneff_est[-1]['group'] = np.unique(df_train[gf])
             df_raneff_est = pd.concat(df_raneff_est).reset_index(drop=True)
-
         df_compare = pd.concat([df_raneff_est.assign(type='est'), df_raneff_true.assign(type='true')]). \
             melt(id_vars=['group', 'gf', 'type']). \
             pivot(index=['group', 'gf', 'variable'], columns='type', values='value'). \
@@ -118,10 +117,9 @@ class TestTraining(unittest.TestCase):
     def test_training_single_gf(self,
                                 response_type: str,
                                 loss_type: Optional[str] = None,
-                                num_groups: int = 500,
                                 num_res: int = 2,
-                                num_obs_per_group: int = 100,
-                                intercept: float = -1.,
+                                intercept: float = -1,
+                                num_groups: int = 500,
                                 noise: float = 1.0):
         print("\n`test_training_single_gf()` with config `{}`".
               format({k: v for k, v in locals().items() if k != 'self'}))

@@ -22,6 +22,7 @@ class ReSolver:
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
     iterative: bool
+    _warm_start_jitter = .01
 
     def __init__(self,
                  X: torch.Tensor,
@@ -104,9 +105,10 @@ class ReSolver:
                 # call it on each optimizer step. we re-use the solutions from the last step as a warm start
                 with torch.no_grad():
                     kwargs['prev_res'] = self._warm_start['res_per_gf'][gf]
-                    kwargs['prev_res'] += (.01 * torch.randn_like(kwargs['prev_res']))
+                    kwargs['prev_res'] += (self._warm_start_jitter * torch.randn_like(kwargs['prev_res']))
             else:
                 kwargs['prev_res'] = None
+                # kwargs['offset'] = fe_offset
 
             if 'Htild_inv' not in kwargs:
                 # TODO: use solve
@@ -134,7 +136,8 @@ class ReSolver:
         kwargs_per_gf = self._initialize_kwargs(prior_precisions=prior_precisions)
 
         if self._warm_start:
-            offsets = {k: v + .01 * torch.randn_like(v) for k, v in self._warm_start['prev_offsets'].items()}
+            offsets = {k: v + self._warm_start_jitter * torch.randn_like(v)
+                       for k, v in self._warm_start['prev_offsets'].items()}
             offsets['_fixed'] = fe_offset
         else:
             offsets = {'_fixed': fe_offset}
@@ -143,7 +146,7 @@ class ReSolver:
         while True:
             history.append({})
             iter_ = len(history)
-            for gf in self.design:
+            for gf in self._shuffled_gfs():
                 gf_kwargs = kwargs_per_gf[gf]
                 # slow start:
                 gf_kwargs['dampen'] = (iter_ / (float(self.slow_start) + iter_))
@@ -192,6 +195,10 @@ class ReSolver:
 
         return res_per_gf
 
+    def _shuffled_gfs(self) -> Sequence[str]:
+        gfs = list(self.design.keys())
+        shuffle(gfs)
+        return gfs
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -203,6 +210,7 @@ class ReSolver:
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
                    converged_mask: Optional[np.ndarray] = None,
+                   dampen: float = 1.0,
                    **kwargs
                    ) -> torch.Tensor:
         """

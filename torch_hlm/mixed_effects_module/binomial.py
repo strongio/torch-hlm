@@ -9,10 +9,8 @@ from .base import MixedEffectsModule, ReSolver
 class BinomialReSolver(ReSolver):
     iterative = True
 
-    def __init__(self, *args, cg: Optional[bool] = None, **kwargs):
+    def __init__(self, *args, cg: Optional[bool] = True, **kwargs):
         super().__init__(*args, **kwargs)
-        if cg is None:
-            cg = len(self.design) == 1
         self.cg = cg
 
     @staticmethod
