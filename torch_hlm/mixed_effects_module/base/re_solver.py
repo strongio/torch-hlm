@@ -21,8 +21,9 @@ class ReSolver:
     passed here if this solver is not being used in a context where the precision matrices are optimized. If the
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
-    iterative: bool
     _warm_start_jitter = .01
+    _step_clamp = 2
+    iterative: bool
 
     def __init__(self,
                  X: torch.Tensor,
@@ -171,11 +172,12 @@ class ReSolver:
             converged = iter_ >= self.min_iter
             _verbose = {}
             for gf, changes in convergence.items():
-                if (changes > self.reltol).any():
+                num_over = (changes > self.reltol).sum().item()
+                if num_over:
                     converged = False
-                _verbose[gf] = changes.max().item()
+                _verbose[gf] = num_over
             if self.verbose:
-                print(f"{type(self).__name__} - Iter {iter_} - Max. Relchanges {_verbose}")
+                print(f"{type(self).__name__} - Iter {iter_} - Ngroups Relchanges>{self.reltol} {_verbose}")
             if converged:
                 break
             elif iter_ >= self.max_iter:
@@ -188,7 +190,27 @@ class ReSolver:
             # if only a single grouping factor, can mask converged:
             if len(self.grouping_factors) == 1:
                 gf = self.grouping_factors[0]
-                kwargs_per_gf[gf]['converged_mask'] = convergence.get(gf) <= self.reltol
+                gf_convergence = convergence.get(gf)
+                if gf_convergence is not None:
+                    kwargs_per_gf[gf]['converged_mask'] = gf_convergence <= self.reltol
+
+            # # TODO: could handle multiple grouping factors if we masked rows then transformed these to groups
+            # #       below is too slow
+            # converged_mask = []
+            # for gf, gf_kwargs in kwargs_per_gf.items():
+            #     gf_changes = convergence.get(gf)
+            #     if gf_changes is None:
+            #         continue
+            #     _, group_idx = np.unique(gf_kwargs['group_ids_seq'], return_inverse=True)
+            #     converged_mask.append(gf_changes[group_idx] <= self.reltol)
+            # if converged_mask:
+            #     converged_mask = torch.all(torch.stack(converged_mask, 1), dim=1).to(torch.float)
+            #     for gf, gf_kwargs in kwargs_per_gf.items():
+            #         ngroups = len(gf_kwargs['Htild_inv'])
+            #         group_conv_counts = torch.zeros(ngroups).scatter_add(0, gf_kwargs['group_ids_seq'], converged_mask)
+            #         # TODO: memoize
+            #         group_counts = torch.zeros(ngroups).scatter_add(0, gf_kwargs['group_ids_seq'], torch.ones_like(converged_mask))
+            #         gf_kwargs['converged_mask'] = (group_conv_counts == group_counts)
 
         res_per_gf = history[-1]
         self._warm_start = {
@@ -199,6 +221,20 @@ class ReSolver:
 
         return res_per_gf
 
+    def solve(self, **kwargs) -> torch.Tensor:
+        """
+        Solve for a single grouping factor
+        """
+        assert self._inner_solve_max_iter > 0
+        history = []
+        for i in range(self._inner_solve_max_iter):
+            new_res = self.solve_step(**kwargs)
+            history.append({'group': new_res})  # wrap in dict for check_convergence
+            kwargs['prev_res'] = new_res
+            changes = dict(self._check_convergence(history)).get('group')
+            if changes is not None and (changes < self._inner_solve_reltol).all():
+                break
+        return new_res
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -274,7 +310,7 @@ class ReSolver:
 
         step = step * dampen
 
-        return prev_res + step
+        return prev_res + step.clamp(-self._step_clamp, self._step_clamp)
 
     @staticmethod
     def ilink(x: torch.Tensor) -> torch.Tensor:
@@ -307,7 +343,9 @@ class ReSolver:
         for gf in history[-1].keys():
             current_res = history[-1][gf]
             prev_res = history[-2][gf]
-            changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
-            if torch.isinf(changes).any() or torch.isnan(changes).any():
+            abs_changes = torch.norm(current_res - prev_res, dim=1)
+            if torch.isinf(abs_changes).any() or torch.isnan(abs_changes).any():
                 raise RuntimeError("Convergence failed; nan/inf values")
-            yield gf, changes
+            prev_res_norm = torch.norm(prev_res, dim=1)
+            rel_changes = abs_changes / prev_res_norm.mean()
+            yield gf, rel_changes
