@@ -1,3 +1,4 @@
+import math
 from collections import OrderedDict
 from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type, Collection, Callable
 from warnings import warn
@@ -119,6 +120,8 @@ class MixedEffectsModule(torch.nn.Module):
 
         covariance_matrix = self.covariance[grouping_factor]() * self.residual_var
         covariance_matrix = covariance_matrix + eps * torch.eye(len(covariance_matrix))
+        if torch.isnan(covariance_matrix).any():
+            raise RuntimeError("`nan`s in covariance")
 
         dist = None
         try:
@@ -396,10 +399,13 @@ class MixedEffectsModule(torch.nn.Module):
         # TODO: cleaner approach
         try:
             dist = self._forward_to_distribution(yhat_samples, total_count=weights.unsqueeze(-1), validate_args=False)
-            log_probs = dist.log_prob((y * weights).unsqueeze(-1)).exp().mean(-1).log()
+            # log_probs = dist.log_prob((y * weights).unsqueeze(-1)).exp().mean(-1).log()
+            log_probs = dist.log_prob((y * weights).unsqueeze(-1)).logsumexp(1) - math.log(nsim)
         except TypeError:
             dist = self._forward_to_distribution(yhat_samples, validate_args=False)
-            log_probs = dist.log_prob(y.unsqueeze(-1)).exp().mean(-1).log() * weights
+            # log_probs = dist.log_prob(y.unsqueeze(-1)).exp().mean(-1).log() * weights
+            log_probs = dist.log_prob(y.unsqueeze(-1)).logsumexp(1) - math.log(nsim)
+            log_probs = log_probs * weights
         return -log_probs.sum()
 
     def _get_iid_loss(self,

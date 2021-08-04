@@ -25,7 +25,7 @@ class TestTraining(unittest.TestCase):
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
-                                  intercept: float = -1.,
+                                  intercept: float = -4.,
                                   noise: float = 1.0):
         print("\n`test_training_multiple_gf()` with config `{}`".
               format({k: v for k, v in locals().items() if k != 'self'}))
@@ -62,8 +62,8 @@ class TestTraining(unittest.TestCase):
             df_train['y'] += noise * np.random.randn(df_train.shape[0]) / df_train['n']
 
         # FIT MODEL -----
-        # covariance = {torch.as_tensor(df_raneff_true_g.drop(columns=['group', 'gf']).dropna(axis=1).cov().values)
-        #               for gf, df_raneff_true_g in df_raneff_true.groupby('gf')}
+        covariance = {gf: torch.as_tensor(df_raneff_true_g.drop(columns=['group', 'gf']).dropna(axis=1).cov().values)
+                      for gf, df_raneff_true_g in df_raneff_true.groupby('gf')}
         raneff_design = {f"g{i + 1}": [f'x{_ + 1}' for _ in range(n)] for i, n in enumerate(num_res)}
         model = MixedEffectsModel(
             fixeff_cols=[],
@@ -97,26 +97,27 @@ class TestTraining(unittest.TestCase):
         df_corr = df_compare.groupby(['variable', 'gf'])[['true', 'est']].corr().reset_index([0, 1])
         try:
             # these are very sensitive to exact config (e.g. num_groups), may want to laxen
-            self.assertGreater(df_corr.loc['true', 'est'].min(), .5 if response_type.startswith('bin') else .7)
+            self.assertGreater(df_corr.loc['true', 'est'].min(), .4 if response_type.startswith('bin') else .7)
             self.assertGreater(df_corr.loc['true', 'est'].mean(), .6 if response_type.startswith('bin') else .8)
         except AssertionError:
             print(df_corr)
             raise
 
     @parameterized.expand([
-        ('binary', 'cv'),
+        ('gaussian', 'iid'),
         ('binary', 'iid'),
         ('binomial', 'iid'),
-        ('gaussian', 'cv'),
         ('gaussian', 'mvnorm'),
-        ('gaussian', 'iid')
-    ])
+        ('binary', 'mc'),
+        ('gaussian', 'mc'),
+    ], skip_on_empty=True)
     def test_training_single_gf(self,
                                 response_type: str,
                                 loss_type: Optional[str] = None,
                                 num_res: int = 2,
                                 intercept: float = -1,
                                 num_groups: int = 500,
+                                num_obs_per_group: int = 100,
                                 noise: float = 1.0):
         print("\n`test_training_single_gf()` with config `{}`".
               format({k: v for k, v in locals().items() if k != 'self'}))
@@ -138,7 +139,7 @@ class TestTraining(unittest.TestCase):
                 df_train['n'] = 1
             df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=df_train['n']) / df_train['n']
         else:
-            df_train['y'] += noise * np.random.randn(df_train.shape[0])
+            df_train['y'] += noise * np.random.randn(df_train.shape[0]) / df_train['n']
 
         df_train['time'] = df_train.groupby('group').cumcount()
         df_train = df_train.merge(
@@ -156,7 +157,7 @@ class TestTraining(unittest.TestCase):
         # FIT MODEL -----
         predictors = df_train.columns[df_train.columns.str.startswith('x')].tolist()
         covariance = 'log_cholesky'
-        if loss_type in ('mvnorm', 'cv'):
+        if loss_type in ('mvnorm', 'mc'):
             print("*will* optimize covariance")
         else:
             print("will *not* optimize covariance")
@@ -168,7 +169,8 @@ class TestTraining(unittest.TestCase):
             response_col='y',
             weight_col='n',
             covariance=covariance,
-            loss_type=loss_type
+            loss_type=loss_type,
+            module_kwargs={'re_scale_penalty': 1},
         )
         model.fit(df_train)
 
