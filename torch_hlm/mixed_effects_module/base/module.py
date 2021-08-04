@@ -411,7 +411,7 @@ class MixedEffectsModule(torch.nn.Module):
 
             for gfi, gf in enumerate(self.grouping_factors):
                 # calculate quantiles:
-                _, inverse, counts = np.unique(group_ids, return_counts=True, return_inverse=True)
+                _, inverse, counts = np.unique(group_ids[:, gfi], return_counts=True, return_inverse=True)
                 min_n = 1 / cv_config['quantile_width']
                 enough = counts >= min_n
                 enough_mask = enough[inverse]
