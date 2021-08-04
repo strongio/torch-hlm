@@ -19,12 +19,14 @@ SEED = 2021 - 8 - 1
 class TestTraining(unittest.TestCase):
 
     @parameterized.expand([
-        ('gaussian', [0, 0, 0]),
-        ('binomial', [0, 0])
+        ('gaussian', [0, 0, 0], True),
+        ('binomial', [0, 0, 0], True),
+        ('binomial', [0, 0], False),
     ], skip_on_empty=True)
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
+                                  known_cov: bool,
                                   intercept: float = -4.,
                                   noise: float = 1.0):
         print("\n`test_training_multiple_gf()` with config `{}`".
@@ -40,6 +42,7 @@ class TestTraining(unittest.TestCase):
                 num_groups=40,
                 obs_per_group=5 if len(num_res) <= 2 else 1,
                 num_raneffects=num_res_g + 1,
+                std_multi=i + .25
             )
             df_train.append(df_train_g.rename(columns={'y': f"g{i + 1}_y", 'group': f'g{i + 1}'}))
             df_raneff_true.append(df_raneff_true_g.assign(gf=f"g{i + 1}"))
@@ -53,7 +56,14 @@ class TestTraining(unittest.TestCase):
         #
         df_raneff_true = pd.concat(df_raneff_true).reset_index(drop=True)
 
-        df_train['n'] = np.random.poisson(5, size=df_train.shape[0]) + 1
+        # shuffle order of group ids to ensure nothing is implicitly depending on that
+        g1_u = df_train['g1'].drop_duplicates()
+        remap = {old: new for old, new in zip(g1_u, g1_u.sample(frac=1))}
+        df_train['g1'] = df_train['g1'].map(remap)
+        df_raneff_true.loc[df_raneff_true['gf'] == 'g1', 'group'] = \
+            df_raneff_true.loc[df_raneff_true['gf'] == 'g1', 'group'].map(remap)
+
+        df_train['n'] = np.random.poisson(10, size=df_train.shape[0]) + 1
         if response_type.startswith('bin'):
             if response_type == 'binary':
                 df_train['n'] = 1
@@ -64,6 +74,7 @@ class TestTraining(unittest.TestCase):
         # FIT MODEL -----
         covariance = {gf: torch.as_tensor(df_raneff_true_g.drop(columns=['group', 'gf']).dropna(axis=1).cov().values)
                       for gf, df_raneff_true_g in df_raneff_true.groupby('gf')}
+        print(covariance)
         raneff_design = {f"g{i + 1}": [f'x{_ + 1}' for _ in range(n)] for i, n in enumerate(num_res)}
         model = MixedEffectsModel(
             fixeff_cols=[],
@@ -72,6 +83,7 @@ class TestTraining(unittest.TestCase):
             response_col='y',
             weight_col='n',
             loss_type='mc',
+            covariance=covariance if known_cov else 'log_cholesky'
         )
         model.fit(df_train)
 

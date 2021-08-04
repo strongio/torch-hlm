@@ -1,12 +1,11 @@
-from random import shuffle
-from typing import Optional, Sequence, Dict, Iterable, Tuple, Callable
+from typing import Optional, Sequence, Dict, Iterable, Tuple
 from warnings import warn
 
 import torch
 import numpy as np
 from scipy.stats import rankdata
 
-from ..utils import chunk_grouped_data, validate_group_ids, validate_tensors, get_yhat_r
+from ..utils import chunk_grouped_data, validate_group_ids, validate_tensors
 
 
 class ReSolver:
@@ -221,20 +220,6 @@ class ReSolver:
 
         return res_per_gf
 
-    def solve(self, **kwargs) -> torch.Tensor:
-        """
-        Solve for a single grouping factor
-        """
-        assert self._inner_solve_max_iter > 0
-        history = []
-        for i in range(self._inner_solve_max_iter):
-            new_res = self.solve_step(**kwargs)
-            history.append({'group': new_res})  # wrap in dict for check_convergence
-            kwargs['prev_res'] = new_res
-            changes = dict(self._check_convergence(history)).get('group')
-            if changes is not None and (changes < self._inner_solve_reltol).all():
-                break
-        return new_res
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -266,6 +251,7 @@ class ReSolver:
             prev_res = .01 * torch.randn(num_groups, num_res)
 
         prior_precision = prior_precision.expand(num_groups, -1, -1)
+        # we do this every call b/c we might have masked out converged groups
         group_ids_seq = torch.as_tensor(rankdata(group_ids, method='dense') - 1)
 
         if converged_mask is not None and converged_mask.any():
@@ -309,6 +295,11 @@ class ReSolver:
         )
 
         step = step * dampen
+
+        if self.verbose:
+            _nclamped = (step.abs() > self._step_clamp).sum().item()
+            if _nclamped:
+                print(f"Had to clamp grad for {_nclamped:,} groups to abs<={self._step_clamp}")
 
         return prev_res + step.clamp(-self._step_clamp, self._step_clamp)
 
