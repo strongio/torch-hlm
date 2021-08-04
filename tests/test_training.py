@@ -19,7 +19,7 @@ SEED = 2021 - 8 - 1
 class TestTraining(unittest.TestCase):
 
     @parameterized.expand([
-        ('gaussian', [0, 0]),
+        ('gaussian', [0, 0, 0]),
         ('binary', [0, 0])
     ], skip_on_empty=True)
     def test_training_multiple_gf(self,

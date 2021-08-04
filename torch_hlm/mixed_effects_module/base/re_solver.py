@@ -80,7 +80,7 @@ class ReSolver:
 
             self.static_kwargs_per_gf[gf] = kwargs
 
-    def _initialize_kwargs(self, fe_offset: torch.Tensor, prior_precisions: Optional[dict] = None) -> dict:
+    def _initialize_kwargs(self, prior_precisions: Optional[dict] = None) -> dict:
         """
         Called at the start of the solver's __call__, this XXX
 
@@ -98,8 +98,6 @@ class ReSolver:
         for gf in self.design.keys():
             kwargs = kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
             kwargs['prior_precision'] = prior_precisions[gf]
-            kwargs['prev_res'] = None
-            kwargs['offset'] = fe_offset
 
             if self._warm_start:
                 # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
@@ -107,8 +105,8 @@ class ReSolver:
                 with torch.no_grad():
                     kwargs['prev_res'] = self._warm_start['res_per_gf'][gf]
                     kwargs['prev_res'] += (.01 * torch.randn_like(kwargs['prev_res']))
-                    kwargs['offset'] = kwargs['offset'] + self._warm_start['re_offsets'][gf]
-                    kwargs['offset'] += (.01 * torch.randn_like(kwargs['offset']))
+            else:
+                kwargs['prev_res'] = None
 
             if 'Htild_inv' not in kwargs:
                 # TODO: use solve
@@ -133,54 +131,67 @@ class ReSolver:
         :return: A dictionary with random-effects for each grouping-factor
         """
 
-        kwargs_per_gf = self._initialize_kwargs(fe_offset=fe_offset, prior_precisions=prior_precisions)
+        kwargs_per_gf = self._initialize_kwargs(prior_precisions=prior_precisions)
 
-        self.history = []
+        if self._warm_start:
+            offsets = {k: v + .01 * torch.randn_like(v) for k, v in self._warm_start['prev_offsets'].items()}
+            offsets['_fixed'] = fe_offset
+        else:
+            offsets = {'_fixed': fe_offset}
+
+        history = []
         while True:
-            # take a step towards solving the random-effects:
-            self.history.append({})
-            for gf in self._shuffled_gfs():
-                self.history[-1][gf] = self.solve_step(**kwargs_per_gf[gf])
+            history.append({})
+            iter_ = len(history)
+            for gf in self.design:
+                gf_kwargs = kwargs_per_gf[gf]
+                # slow start:
+                gf_kwargs['dampen'] = (iter_ / (float(self.slow_start) + iter_))
+
+                # recompute offset:
+                gf_kwargs['offset'] = torch.sum(torch.stack([v for gf2, v in offsets.items() if gf2 != gf], 1), 1)
+
+                # solve step:
+                history[-1][gf] = gf_res = self.solve_step(**gf_kwargs)
+                if not self.iterative or len(self.design) == 1:
+                    continue
+                # recompute offset for other gfs:
+                _, group_idx = np.unique(gf_kwargs['group_ids'], return_inverse=True)
+                offsets[gf] = (gf_kwargs['X'] * gf_res[group_idx]).sum(1)
 
             # check convergence:
             if not self.iterative:
                 break
 
-            convergence = dict(self._check_convergence())
-            converged = len(self.history) >= self.min_iter
+            convergence = dict(self._check_convergence(history))
+            converged = iter_ >= self.min_iter
             _verbose = {}
             for gf, changes in convergence.items():
-                # TODO: patience
                 if (changes > self.reltol).any():
                     converged = False
                 _verbose[gf] = changes.max().item()
             if self.verbose:
-                print(f"{type(self).__name__} - Iter {len(self.history)} - Max. Relchanges {_verbose}")
+                print(f"{type(self).__name__} - Iter {iter_} - Max. Relchanges {_verbose}")
+
             if converged:
                 break
 
-            # recompute offset, etc:
-            kwargs_per_gf = self._update_kwargs(kwargs_per_gf, fe_offset=fe_offset, convergence=convergence)
-
-            if len(self.history) >= self.max_iter:
+            if iter_ >= self.max_iter:
                 for gf, changes in convergence.items():
                     unconverged = (changes > self.reltol).sum()
                     if unconverged:
                         warn(f"There are {unconverged:,} unconverged for {gf}, max-relchange {changes.max()}")
                 break
 
-        res_per_gf = self.history[-1]
+        res_per_gf = history[-1]
         self._warm_start = {
-            'res_per_gf': {k: v.detach() for k, v in res_per_gf.items()},
-            're_offsets': {k: v[1:].detach().sum(0) for k, v in self._recompute_offsets(fe_offset, res_per_gf).items()}
+            'res_per_gf': {gf: v.detach() for gf, v in res_per_gf.items()},
+            'prev_offsets': {k: v.detach() for k, v in offsets.items() if k != '_fixed'}
         }
+        self._last_call_history = history
 
         return res_per_gf
 
-    def _shuffled_gfs(self) -> Sequence[str]:
-        gfs = list(self.design.keys())
-        shuffle(gfs)
-        return gfs
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -252,8 +263,8 @@ class ReSolver:
             Htild_inv=Htild_inv,
             prior_precision=prior_precision
         )
-        iter_ = len(self.history) + 1
-        step = step * (iter_ / (float(self.slow_start) + iter_))
+
+        step = step * dampen
 
         return prev_res + step
 
@@ -270,27 +281,6 @@ class ReSolver:
     def _calculate_step(self, grad: torch.Tensor, Htild_inv: torch.Tensor, **kwargs):
         return (Htild_inv @ grad.unsqueeze(-1)).squeeze(-1)
 
-    def _get_hessians(self,
-                      fe_offset: torch.Tensor,
-                      prior_precisions: Optional[torch.Tensor]) -> Dict[str, torch.Tensor]:
-        if prior_precisions is None:
-            if self.prior_precisions is None:
-                raise ValueError("Please pass `prior_precisions`")
-            prior_precisions = self.prior_precisions
-        out = {}
-        for gfi, (gf, col_idx) in enumerate(self.design.items()):
-            group_ids_seq = torch.as_tensor(rankdata(self.group_ids[:, gfi], method='dense') - 1)
-            col_idx = self.design[gf]
-            X = torch.cat([torch.ones((len(self.X), 1)), self.X[:, col_idx]], 1)
-            res_broad = self.history[-1][gf][group_ids_seq]
-            yhat = (X * res_broad).sum(1) + fe_offset + self._warm_start['re_offsets'][gf]
-            mu = self.ilink(yhat)
-            pp = prior_precisions[gf]
-            out[gf] = torch.stack([
-                self._get_hessian(Xg, wg, mug) + pp for gi, (Xg, wg, mug)
-                in enumerate(chunk_grouped_data(X, self.weights, mu, group_ids=group_ids_seq))
-            ])
-        return out
 
     @staticmethod
     def _get_hessian(
@@ -299,55 +289,13 @@ class ReSolver:
             mu: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def _update_kwargs(self,
-                       kwargs_per_gf: dict,
-                       fe_offset: torch.Tensor,
-                       convergence: dict) -> Optional[dict]:
-        """
-        Called on each iteration of the solver's __call__, this method recomputes the offset
-
-        :param kwargs_per_gf: XXX
-        :param fe_offset: XXX
-        :return:
-        """
-        assert self.history
-        res_per_gf = self.history[-1]
-
-        with torch.no_grad():  # TODO: in testing, `no_grad` was critical; unclear why
-            new_offsets = self._recompute_offsets(fe_offset, res_per_gf)
-
-        out = {}
-        for gf in kwargs_per_gf.keys():
-            out[gf] = kwargs_per_gf[gf].copy()
-            out[gf]['offset'] = new_offsets[gf].sum(0)
-            out[gf]['prev_res'] = res_per_gf[gf]
-            if len(self.design) == 1 and gf in convergence:
-                out[gf]['converged_mask'] = convergence[gf] <= self.reltol
-
-        return out
-
-    def _recompute_offsets(self,
-                           fe_offset: torch.Tensor,
-                           res_per_gf: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        res_per_gf = {k: res_per_gf[k] for k in self.design}  # ordering matters b/c of enumerate below
-        yhat_r = get_yhat_r(design=self.design, X=self.X, group_ids=self.group_ids, res_per_gf=res_per_gf)
-        out = {}
-        for gf1 in self.design.keys():
-            out[gf1] = [fe_offset]
-            for i, gf2 in enumerate(self.design.keys()):
-                if gf1 == gf2:
-                    continue
-                out[gf1].append(yhat_r[:, i])
-            out[gf1] = torch.stack(out[gf1])
-        return out
-
     @torch.no_grad()
-    def _check_convergence(self) -> Iterable[Tuple[str, torch.Tensor]]:
-        if len(self.history) < 2:
+    def _check_convergence(self, history: Sequence[dict]) -> Iterable[Tuple[str, torch.Tensor]]:
+        if len(history) < 2:
             return {}
         for gf in self.design.keys():
-            current_res = self.history[-1][gf]
-            prev_res = self.history[-2][gf]
+            current_res = history[-1][gf]
+            prev_res = history[-2][gf]
             changes = torch.norm(current_res - prev_res, dim=1) / torch.norm(prev_res, dim=1)
             if torch.isinf(changes).any() or torch.isnan(changes).any():
                 raise RuntimeError("Convergence failed; nan/inf values")
