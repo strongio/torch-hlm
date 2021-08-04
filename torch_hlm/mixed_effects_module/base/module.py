@@ -174,7 +174,7 @@ class MixedEffectsModule(torch.nn.Module):
             with torch.no_grad():
                 # solve random-effects:
                 if len(rs_group_ids):
-                    res_per_gf = self.get_res(*re_solve_data)
+                    res_per_gf = self.get_res(*re_solve_data, verbose=False if quiet else 'prog')
                 else:
                     # i.e. re_solve_data is empty
                     res_per_gf = {gf: torch.zeros((0, len(idx) + 1)) for gf, idx in self.rf_idx.items()}

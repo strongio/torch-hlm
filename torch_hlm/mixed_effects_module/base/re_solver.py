@@ -1,3 +1,6 @@
+import time
+from tqdm.auto import tqdm
+
 from typing import Optional, Sequence, Dict, Iterable, Tuple
 from warnings import warn
 
@@ -142,6 +145,12 @@ class ReSolver:
         else:
             offsets = {'_fixed': fe_offset}
 
+        _start = time.time()
+
+        prog = None
+        if isinstance(self.verbose, str) and self.verbose.startswith('prog') and self.iterative:
+            prog = tqdm(delay=20, total=self.max_iter)
+
         history = []
         while True:
             history.append({})
@@ -175,7 +184,9 @@ class ReSolver:
                 if num_over:
                     converged = False
                 _verbose[gf] = num_over
-            if self.verbose:
+            if prog is not None:
+                prog.update()
+            elif self.verbose:
                 print(f"{type(self).__name__} - Iter {iter_} - Ngroups Relchanges>{self.reltol} {_verbose}")
             if converged:
                 break
