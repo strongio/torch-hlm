@@ -110,7 +110,7 @@ class ReSolver:
                     kwargs['offset'] = kwargs['offset'] + self._warm_start['re_offsets'][gf]
                     kwargs['offset'] += (.01 * torch.randn_like(kwargs['offset']))
 
-            if prior_precisions is not None:
+            if 'Htild_inv' not in kwargs:
                 # TODO: use solve
                 # Htild_inv was not precomputed, compute it here
                 XtX = kwargs['XtX']
