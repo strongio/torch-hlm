@@ -155,7 +155,7 @@ class ReSolver:
                 gf_kwargs['offset'] = torch.sum(torch.stack([v for gf2, v in offsets.items() if gf2 != gf], 1), 1)
 
                 # solve step:
-                history[-1][gf] = gf_res = self.solve_step(**gf_kwargs)
+                history[-1][gf] = gf_res = gf_kwargs['prev_res'] = self.solve_step(**gf_kwargs)
                 if not self.iterative or len(self.design) == 1:
                     continue
                 # recompute offset for other gfs:
