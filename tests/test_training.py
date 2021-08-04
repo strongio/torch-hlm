@@ -20,7 +20,7 @@ class TestTraining(unittest.TestCase):
 
     @parameterized.expand([
         ('gaussian', [0, 0, 0]),
-        ('binary', [0, 0])
+        ('binomial', [0, 0])
     ], skip_on_empty=True)
     def test_training_multiple_gf(self,
                                   response_type: str,
@@ -38,8 +38,8 @@ class TestTraining(unittest.TestCase):
         for i, num_res_g in enumerate(num_res):
             df_train_g, df_raneff_true_g = simulate_raneffects(
                 num_groups=40,
-                obs_per_group=1,
-                num_raneffects=num_res_g + 1
+                obs_per_group=5 if len(num_res) <= 2 else 1,
+                num_raneffects=num_res_g + 1,
             )
             df_train.append(df_train_g.rename(columns={'y': f"g{i + 1}_y", 'group': f'g{i + 1}'}))
             df_raneff_true.append(df_raneff_true_g.assign(gf=f"g{i + 1}"))
@@ -53,28 +53,25 @@ class TestTraining(unittest.TestCase):
         #
         df_raneff_true = pd.concat(df_raneff_true).reset_index(drop=True)
 
-        if response_type == 'binary':
-            df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=1)
-        elif response_type == 'binomial':
-            raise NotImplementedError("TODO")
+        df_train['n'] = np.random.poisson(5, size=df_train.shape[0]) + 1
+        if response_type.startswith('bin'):
+            if response_type == 'binary':
+                df_train['n'] = 1
+            df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=df_train['n']) / df_train['n']
         else:
-            df_train['y'] += noise * np.random.randn(df_train.shape[0])
+            df_train['y'] += noise * np.random.randn(df_train.shape[0]) / df_train['n']
 
         # FIT MODEL -----
-        covariance = {}
-        for gf, df_raneff_true_g in df_raneff_true.groupby('gf'):
-            covariance[gf] = torch.as_tensor(df_raneff_true_g.drop(columns=['group', 'gf']).cov().values)
-
-        raneff_design = {f"g{i + 1}": [] for i in range(len(num_res))}
-        for gf in list(raneff_design):
-            raneff_design[gf] = df_train.columns[df_train.columns.str.startswith(gf + '_x')].tolist()
+        # covariance = {torch.as_tensor(df_raneff_true_g.drop(columns=['group', 'gf']).dropna(axis=1).cov().values)
+        #               for gf, df_raneff_true_g in df_raneff_true.groupby('gf')}
+        raneff_design = {f"g{i + 1}": [f'x{_ + 1}' for _ in range(n)] for i, n in enumerate(num_res)}
         model = MixedEffectsModel(
             fixeff_cols=[],
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design=raneff_design,
             response_col='y',
-            covariance=covariance,
-            loss_type='cv'
+            weight_col='n',
+            loss_type='mc',
         )
         model.fit(df_train)
 
