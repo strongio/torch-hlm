@@ -173,6 +173,7 @@ class TestTraining(unittest.TestCase):
         true_cov = torch.as_tensor(df_raneff_true.drop(columns='group').cov().values)
         if loss_type in ('mvnorm', 'mc'):
             print("*will* optimize covariance")
+            optimize_cov = True
         else:
             print("will *not* optimize covariance")
             optimize_cov = False
@@ -209,7 +210,7 @@ class TestTraining(unittest.TestCase):
         # posterior modes:
         with torch.no_grad():
             df_raneff_est = pd.DataFrame(
-                model.module_.get_res(*model.build_model_mats(df_train), verbose=True)['group'].numpy(),
+                model.module_.get_res(*model.build_model_mats(df_train))['group'].numpy(),
                 columns=df_raneff_true.columns[0:-1])
             df_raneff_est['group'] = df_raneff_true['group']
 
