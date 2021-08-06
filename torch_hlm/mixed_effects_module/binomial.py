@@ -66,7 +66,18 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
     solver_cls = BinomialReSolver
 
     def _get_default_loss_type(self) -> str:
-        return 'iid'
+        if len(self.grouping_factors) == 1:
+            return 'mc'
+        else:
+            return 'iid'
 
     def _forward_to_distribution(self, pred: torch.Tensor, **kwargs) -> torch.distributions.Distribution:
         return torch.distributions.Binomial(logits=pred, **kwargs)
+
+    def _get_iid_log_probs(self,
+                           pred: torch.Tensor,
+                           actual: torch.Tensor,
+                           weights: torch.Tensor) -> torch.Tensor:
+        dist = self._forward_to_distribution(pred, total_count=weights, validate_args=False)
+        log_probs = dist.log_prob(actual * weights)
+        return log_probs

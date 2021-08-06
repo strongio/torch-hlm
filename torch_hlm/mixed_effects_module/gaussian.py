@@ -133,7 +133,16 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         if len(self.rf_idx) == 1:
             return 'mvnorm'
         else:
-            return 'mc'
+            return 'iid'
+
+    def _get_iid_log_probs(self,
+                           pred: torch.Tensor,
+                           actual: torch.Tensor,
+                           weights: torch.Tensor) -> torch.Tensor:
+        dist = self._forward_to_distribution(pred, validate_args=False)
+        dist.scale = dist.scale / weights
+        log_probs = dist.log_prob(actual)
+        return log_probs
 
     def _get_mvnorm_log_prob(self,
                              X: torch.Tensor,
@@ -192,7 +201,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             #     validate_args=False
             # )
             cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1) / w_r.sqrt().unsqueeze(-1)
+            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1) / (w_r.unsqueeze(-1) ** 2)
             mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r, validate_args=True)
 
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))

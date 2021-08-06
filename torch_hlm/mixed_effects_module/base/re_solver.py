@@ -33,7 +33,7 @@ class ReSolver:
                  group_ids: np.ndarray,
                  weights: Optional[torch.Tensor],
                  design: dict,
-                 slow_start: bool = True,
+                 slow_start: bool = True,  # TODO: replace with clamp?
                  prior_precisions: Optional[dict] = None,
                  verbose: bool = False,
                  max_iter: Optional[int] = None,
@@ -88,7 +88,6 @@ class ReSolver:
         """
         Called at the start of the solver's __call__, this XXX
 
-        :param fe_offset: XXX
         :param prior_precisions: XXX
         :return:
         """
@@ -111,7 +110,6 @@ class ReSolver:
                     kwargs['prev_res'] += (self._warm_start_jitter * torch.randn_like(kwargs['prev_res']))
             else:
                 kwargs['prev_res'] = None
-                # kwargs['offset'] = fe_offset
 
             if 'Htild_inv' not in kwargs:
                 # TODO: use torch.cholesky -> cholesky_solve
@@ -168,6 +166,7 @@ class ReSolver:
                 history[-1][gf] = gf_res = gf_kwargs['prev_res'] = self.solve_step(**gf_kwargs)
                 if not self.iterative or len(self.design) == 1:
                     continue
+
                 # recompute offset for other gfs:
                 _, group_idx = np.unique(gf_kwargs['group_ids'], return_inverse=True)
                 offsets[gf] = (gf_kwargs['X'] * gf_res[group_idx]).sum(1)

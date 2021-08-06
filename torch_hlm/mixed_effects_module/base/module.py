@@ -1,13 +1,14 @@
 import math
 from collections import OrderedDict
-from typing import Union, Optional, Sequence, Iterator, Dict, Tuple, Type, Collection, Callable
+
+from scipy.stats import rankdata
+from typing import Union, Optional, Sequence, Iterator, Dict, Type, Collection, Callable
 from warnings import warn
 
 import torch
 import numpy as np
-from sklearn.model_selection import StratifiedShuffleSplit
 
-from ..utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r, pad_res_per_gf
+from ..utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r, pad_res_per_gf, get_to_kwargs
 from ...covariance import Covariance
 
 
@@ -370,42 +371,49 @@ class MixedEffectsModule(torch.nn.Module):
                      group_ids: np.ndarray,
                      weights: Optional[torch.Tensor],
                      cache: dict,
-                     nsim: Optional[int] = None,
+                     nsim: int = 500,
                      **kwargs) -> torch.Tensor:
         X, y = validate_tensors(X, y)
         if weights is None:
             weights = torch.ones_like(y)
         assert len(weights) == len(y)
 
-        if nsim is None:
-            # TODO
-            nsim = int(max(200 + 100 * (len(col_idx) + 1) ** 1.5 for gf, col_idx in self.rf_idx.items()))
-
-        yhats = []
-        for gf, col_idx in self.rf_idx.items():
-            chol = self.re_distribution(gf).scale_tril
-            num_res = len(chol)
-
-            if f'white_noise_{gf}' not in cache:
-                cache[f'white_noise_{gf}'] = torch.randn((nsim, num_res), dtype=chol.dtype, device=chol.device)
-            sampled_res = (cache[f'white_noise_{gf}'] @ chol).T
-
-            Xr = torch.cat([torch.ones((len(X), 1)), X[:, col_idx]], 1)
-            yhats.append((Xr.unsqueeze(-1) * sampled_res.unsqueeze(0)).sum(1))
-
+        if len(self.grouping_factors) > 1:
+            raise NotImplementedError("mc_loss currently not implemented for more than one grouping factor")
+        gf = self.grouping_factors[0]
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
-        yhat_samples = yhat_f.unsqueeze(-1) + torch.sum(torch.stack(yhats, 1), 1)
 
-        # TODO: cleaner approach
-        try:
-            dist = self._forward_to_distribution(yhat_samples, total_count=weights.unsqueeze(-1), validate_args=False)
-            # log_probs = dist.log_prob((y * weights).unsqueeze(-1)).exp().mean(-1).log()
-            log_probs = dist.log_prob((y * weights).unsqueeze(-1)).logsumexp(1) - math.log(nsim)
-        except TypeError:
-            dist = self._forward_to_distribution(yhat_samples, validate_args=False)
-            # log_probs = dist.log_prob(y.unsqueeze(-1)).exp().mean(-1).log() * weights
-            log_probs = dist.log_prob(y.unsqueeze(-1)).logsumexp(1) - math.log(nsim)
-            log_probs = log_probs * weights
+        re_dist = self.re_distribution(gf)
+
+        if 'white_noise' not in cache:
+            cache['white_noise'] = torch.randn((nsim, re_dist.event_shape[0]))  # .clamp(-3.5, 3.5)
+
+        if f'x_r_{gf}' not in cache:
+            cache[f'Xr_{gf}'] = torch.cat([torch.ones((len(X), 1)), X[:, self.rf_idx[gf]]], 1)
+
+        if 'group_ids_seq' not in cache:
+            cache['group_ids_seq'] = torch.as_tensor(rankdata(group_ids, method='dense') - 1).unsqueeze(-1)
+
+        re_samples = (re_dist.scale_tril @ cache['white_noise'].unsqueeze(-1)).squeeze(-1)
+        yhat_r_samples = (cache[f'Xr_{gf}'].unsqueeze(-1) * re_samples.T.unsqueeze(0)).sum(1)
+        yhat_samples = yhat_f.unsqueeze(-1) + yhat_r_samples
+        # y_dist = torch.distributions.Normal(loc=yhat_samples, scale=self.residual_var ** .5)
+        # integral_wrt_b_random[ p(y|b_fixed, b_random)] * p(b_random|re_cov) ]
+        #   ~=
+        # mean[ p(y|b_fixed, b_random_i)) ], b_random_i ~ mvnorm(re_cov)
+        # log_integrand = y_dist.log_prob(y.unsqueeze(-1))
+        log_integrand = self._get_iid_log_probs(
+            pred=yhat_samples,
+            actual=y.unsqueeze(-1),
+            weights=weights.unsqueeze(-1)  # TODO: confirm OK for gaussian
+        )
+
+        ngroups = cache['group_ids_seq'].max() + 1
+        group_ids_broad = cache['group_ids_seq'].expand(-1, nsim)
+        lps_per_group = torch.zeros((ngroups, nsim)).scatter_add(0, group_ids_broad, log_integrand)
+        log_probs_unnorm = lps_per_group.logsumexp(1)
+        log_probs = log_probs_unnorm - math.log(nsim)
+
         return -log_probs.sum()
 
     def _get_iid_loss(self,
@@ -452,14 +460,14 @@ class MixedEffectsModule(torch.nn.Module):
         yhat_f = validate_1d_like(self.fixed_effects_nn(X[:, self.ff_idx]))
         res_per_gf = solver(fe_offset=yhat_f)
         pred = self.forward(X=X, group_ids=group_ids, res_per_gf=res_per_gf)
-        # TODO: cleaner approach
-        try:
-            dist = self._forward_to_distribution(pred, total_count=weights, validate_args=False)
-            log_probs = dist.log_prob(y * weights)
-        except TypeError:
-            dist = self._forward_to_distribution(pred, validate_args=False)
-            log_probs = dist.log_prob(y) * weights
+        log_probs = self._get_iid_log_probs(pred, y, weights)
         return -log_probs.sum()
+
+    def _get_iid_log_probs(self,
+                           pred: torch.Tensor,
+                           actual: torch.Tensor,
+                           weights: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:
         """
