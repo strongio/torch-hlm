@@ -348,12 +348,7 @@ class MixedEffectsModule(torch.nn.Module):
                   cache: dict,
                   loss_type: Optional[str] = None,
                   **kwargs) -> torch.Tensor:
-
-        if loss_type.startswith('cv'):
-            return self._get_cv_loss(
-                X=X, y=y, group_ids=group_ids, cache=cache, weights=weights, **kwargs
-            )
-        elif loss_type.startswith('iid'):
+        if loss_type.startswith('iid'):
             return self._get_iid_loss(
                 X=X, y=y, group_ids=group_ids, cache=cache, weights=weights, **kwargs
             )

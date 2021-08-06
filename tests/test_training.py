@@ -25,7 +25,6 @@ class TestTraining(unittest.TestCase):
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
-                                  known_cov: bool,
                                   intercept: float = -4.,
                                   noise: float = 1.0):
         """
@@ -123,8 +122,8 @@ class TestTraining(unittest.TestCase):
         ('binary', 'iid'),
         ('binomial', 'iid'),
         ('gaussian', 'mvnorm'),
-        ('binary', 'mc'),
         ('gaussian', 'mc'),
+        ('binomial', 'mc')
     ], skip_on_empty=True)
     def test_training_single_gf(self,
                                 response_type: str,
