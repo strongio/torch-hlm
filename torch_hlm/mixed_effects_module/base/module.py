@@ -187,6 +187,7 @@ class MixedEffectsModule(torch.nn.Module):
                 )
 
         if re_solve_data is not None:
+            # TODO: res_per_gf as inits for ReSolver
             raise TypeError("Must pass one of `re_solve_data`, `betas_per_group`; got both.")
 
         # validate group_ids
@@ -358,7 +359,6 @@ class MixedEffectsModule(torch.nn.Module):
             )
         else:
             raise NotImplementedError(f"{type(self).__name__} does not implement type={loss_type}")
-
 
     def _get_mc_loss(self,
                      X: torch.Tensor,

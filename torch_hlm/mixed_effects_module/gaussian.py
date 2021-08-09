@@ -140,7 +140,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
                            actual: torch.Tensor,
                            weights: torch.Tensor) -> torch.Tensor:
         dist = self._forward_to_distribution(pred, validate_args=False)
-        dist.scale = dist.scale / weights
+        dist.scale = dist.scale / torch.sqrt(weights)
         log_probs = dist.log_prob(actual)
         return log_probs
 
@@ -201,8 +201,12 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             #     validate_args=False
             # )
             cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_r = (self.residual_var * torch.eye(r)).expand(ng, -1, -1) / (w_r.unsqueeze(-1) ** 2)
-            mvnorm = MultivariateNormal(loc=loc, covariance_matrix=eps_r + cov_r, validate_args=True)
+            eps_diag_r = self.residual_var / w_r
+            if torch.isnan(cov_r).any() or torch.isinf(cov_r).any():
+                raise ValueError("Nans/infs in parameters")
+            mvnorm = MultivariateNormal(
+                loc=loc, covariance_matrix=torch.diag_embed(eps_diag_r) + cov_r, validate_args=True
+            )
 
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
 

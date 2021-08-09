@@ -102,21 +102,21 @@ def get_to_kwargs(x) -> dict:
 
 
 def pad_res_per_gf(res_per_gf: Dict[str, torch.Tensor],
-                   group_ids1: Sequence,
-                   group_ids2: Sequence,
+                   group_ids_predict: Sequence,
+                   group_ids_solve: Sequence,
                    verbose: bool = False) -> Dict[str, torch.Tensor]:
     # there is no requirement that all groups in `group_ids` are present in `group_data`, or vice versa, so
     # need to map the re_solve output
     res_per_gf_padded = {}
     for gf_i, gf in enumerate(res_per_gf):
-        ugroups_target = {gid: i for i, gid in enumerate(np.unique(group_ids1[:, gf_i]))}
-        ugroups_solve = {gid: i for i, gid in enumerate(np.unique(group_ids2[:, gf_i]))}
+        ugroups_target = {gid: i for i, gid in enumerate(np.unique(group_ids_predict[:, gf_i]))}
+        ugroups_solve = {gid: i for i, gid in enumerate(np.unique(group_ids_solve[:, gf_i]))}
         set1 = set(ugroups_solve) - set(ugroups_target)
         if set1 and verbose:
-            print(f"there are {len(set1):,} groups in `re_solve_data` but not in `X`")
+            print(f"there are {len(set1):,} groups in solve data but not in predict data")
         set2 = set(ugroups_target) - set(ugroups_solve)
         if set2 and verbose:
-            print(f"there are {len(set2):,} groups in `X` but not in `re_solve_data`")
+            print(f"there are {len(set2):,} groups in predict data but not in solve data")
 
         res_per_gf_padded[gf] = torch.zeros(
             (len(ugroups_target), res_per_gf[gf].shape[-1]), device=res_per_gf[gf].device, dtype=res_per_gf[gf].dtype

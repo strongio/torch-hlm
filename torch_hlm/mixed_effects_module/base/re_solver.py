@@ -230,7 +230,6 @@ class ReSolver:
 
         return res_per_gf
 
-
     def solve_step(self,
                    X: torch.Tensor,
                    y: torch.Tensor,

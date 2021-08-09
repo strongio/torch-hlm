@@ -25,7 +25,7 @@ class TestTraining(unittest.TestCase):
     def test_training_multiple_gf(self,
                                   response_type: str,
                                   num_res: Sequence[int],
-                                  intercept: float = -4.,
+                                  intercept: float = -2.,
                                   noise: float = 1.0):
         """
         Primary purpose is to test ReSolver for multiple grouping factors -- iid loss not reliable for recovering true
@@ -71,7 +71,7 @@ class TestTraining(unittest.TestCase):
                 df_train['n'] = 1
             df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=df_train['n']) / df_train['n']
         else:
-            df_train['y'] += noise * np.random.randn(df_train.shape[0]) / df_train['n']
+            df_train['y'] += np.random.normal(scale=noise / np.sqrt(df_train['n']))
 
         # FIT MODEL -----
         covariance = {gf: torch.as_tensor(df_raneff_true_g.drop(columns=['group', 'gf']).dropna(axis=1).cov().values)
@@ -90,7 +90,7 @@ class TestTraining(unittest.TestCase):
         model.fit(df_train)
 
         # COMPARE TRUE vs. EST -----
-        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .13 * len(num_res))
+        self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .14 * len(num_res))
         wt = model.module_.fixed_effects_nn.weight.squeeze()
         assert not len(wt)  # haven't set up unit-tests for this
 
@@ -153,7 +153,7 @@ class TestTraining(unittest.TestCase):
                 df_train['n'] = 1
             df_train['y'] = np.random.binomial(p=expit(df_train['y'].values), n=df_train['n']) / df_train['n']
         else:
-            df_train['y'] += noise * np.random.randn(df_train.shape[0]) / df_train['n']
+            df_train['y'] += np.random.normal(scale=noise / np.sqrt(df_train['n']))
 
         df_train['time'] = df_train.groupby('group').cumcount()
         df_train = df_train.merge(
