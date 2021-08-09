@@ -24,7 +24,7 @@ class ReSolver:
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
     _warm_start_jitter = .01
-    _step_clamp = 2
+    _grad_clamp = 50
     iterative: bool
 
     def __init__(self,
@@ -33,7 +33,7 @@ class ReSolver:
                  group_ids: np.ndarray,
                  weights: Optional[torch.Tensor],
                  design: dict,
-                 slow_start: bool = True,  # TODO: replace with clamp?
+                 slow_start: bool = True,
                  prior_precisions: Optional[dict] = None,
                  verbose: bool = False,
                  max_iter: Optional[int] = None,
@@ -287,7 +287,15 @@ class ReSolver:
         mu = self.ilink(yhat)
 
         # grad:
-        grad_els = self._calculate_grad(X, y, mu) * weights.unsqueeze(-1)
+        grad_els = self._calculate_grad(X, y, mu)
+
+        if self.verbose:
+            _num_clamped = (grad_els.abs() > self._grad_clamp).sum().item()
+            if _num_clamped:
+                print(f"Clamped grad for {_num_clamped:,} elements to abs<={self._grad_clamp}")
+                # print(step[step.abs() > self._grad_clamp])
+        grad_els = grad_els.clamp(-self._grad_clamp, self._grad_clamp) * weights.unsqueeze(-1)
+
         group_ids_broad = group_ids_seq.unsqueeze(-1).expand(-1, num_res)
         grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
         grad = grad_no_pen - (prior_precision @ prev_res.unsqueeze(-1)).squeeze(-1)
@@ -305,12 +313,7 @@ class ReSolver:
 
         step = step * dampen
 
-        if self.verbose:
-            _nclamped = (step.abs() > self._step_clamp).sum().item()
-            if _nclamped:
-                print(f"Had to clamp grad for {_nclamped:,} groups to abs<={self._step_clamp}")
-
-        return prev_res + step.clamp(-self._step_clamp, self._step_clamp)
+        return prev_res + step
 
     @staticmethod
     def ilink(x: torch.Tensor) -> torch.Tensor:
