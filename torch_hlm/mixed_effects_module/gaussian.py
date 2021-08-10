@@ -26,6 +26,9 @@ class GaussianReSolver(ReSolver):
         self.iterative = len(design) > 1
         super().__init__(X=X, y=y, group_ids=group_ids, weights=weights, design=design, **kwargs)
 
+    def _calculate_htild_inv(self, XtX: torch.Tensor, pp: torch.Tensor) -> torch.Tensor:
+        return torch.inverse(XtX + pp)
+
     @staticmethod
     def ilink(x: torch.Tensor) -> torch.Tensor:
         return x
@@ -201,13 +204,26 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             #     validate_args=False
             # )
             cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)
-            eps_diag_r = self.residual_var / w_r
+            sigma_diag_r = self.residual_var / w_r
             if torch.isnan(cov_r).any() or torch.isinf(cov_r).any():
                 raise ValueError("Nans/infs in parameters")
-            mvnorm = MultivariateNormal(
-                loc=loc, covariance_matrix=torch.diag_embed(eps_diag_r) + cov_r, validate_args=True
-            )
+            mvnorm = _mvnorm_eps(loc, sigma_diag_r, cov_r)
 
             log_probs.append(mvnorm.log_prob(torch.stack(y_r)))
 
         return torch.cat(log_probs).sum()
+
+
+def _mvnorm_eps(loc, sigma_diag, cov, start_eps: float = .000001):
+    mvnorm = None
+    eps = start_eps
+    while mvnorm is None:
+        try:
+            mvnorm = MultivariateNormal(
+                loc=loc, covariance_matrix=torch.diag_embed(sigma_diag + eps) + cov, validate_args=True
+            )
+        except ValueError:
+            eps *= 10
+        if eps > .01:
+            raise
+    return mvnorm

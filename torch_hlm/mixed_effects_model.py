@@ -11,7 +11,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from torch_hlm.mixed_effects_module import MixedEffectsModule
-from torch_hlm.mixed_effects_module.utils import get_to_kwargs
+from torch_hlm.mixed_effects_module.utils import get_to_kwargs, pad_res_per_gf
 
 
 class MixedEffectsModel(BaseEstimator):
@@ -306,7 +306,11 @@ class MixedEffectsModel(BaseEstimator):
         return self.optimizer_
 
     @torch.no_grad()
-    def predict(self, X: pd.DataFrame, group_data: pd.DataFrame, type: str = 'mean', **kwargs) -> np.ndarray:
+    def predict(self,
+                X: pd.DataFrame,
+                group_data: pd.DataFrame,
+                type: str = 'mean',
+                **kwargs) -> np.ndarray:
         """
         :param X: A dataframe with the predictors for fixed and random effects, as well as the group-id column.
         :param group_data: Historical data that will be used to obtain RE-estimates for each group, which will then be
@@ -317,12 +321,22 @@ class MixedEffectsModel(BaseEstimator):
          logits). Default 'mean'.
         :return: An ndarray of predictions
         """
+        if 'verbose' not in kwargs:
+            kwargs['verbose'] = 'prog'
         X, _, group_ids, _ = self.build_model_mats(X, expect_y=False)
         re_solve_data = self.build_model_mats(group_data, expect_y=True)
-        dist = self.module_.predict_distribution_mode(X, group_ids=group_ids, re_solve_data=re_solve_data)
+
+        _, _, rs_group_ids, *_ = re_solve_data
+        # solve random-effects:
+        if len(rs_group_ids):
+            res_per_gf = self.module_.get_res(*re_solve_data, **kwargs)
+        else:
+            # i.e. re_solve_data is empty
+            res_per_gf = {gf: torch.zeros((0, len(idx) + 1)) for gf, idx in self.module_.rf_idx.items()}
+        res_per_gf_padded = pad_res_per_gf(res_per_gf, group_ids, rs_group_ids, verbose=kwargs['verbose'])
+
+        dist = self.module_.predict_distribution_mode(X, group_ids=group_ids, res_per_gf=res_per_gf_padded)
         pred = getattr(dist, type)
-        if callable(pred):
-            pred = pred(**kwargs)
         return pred.numpy()
 
 

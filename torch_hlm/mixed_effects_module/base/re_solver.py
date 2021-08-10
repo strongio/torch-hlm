@@ -24,7 +24,7 @@ class ReSolver:
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
     _warm_start_jitter = .01
-    _grad_clamp = 50
+    _grad_clamp = 5
     iterative: bool
 
     def __init__(self,
@@ -38,7 +38,7 @@ class ReSolver:
                  verbose: bool = False,
                  max_iter: Optional[int] = None,
                  min_iter: int = 5,
-                 reltol: float = .01):
+                 reltol: float = .001):
 
         self.X, self.y = validate_tensors(X, y)
         if weights is None:
@@ -80,9 +80,12 @@ class ReSolver:
                 XtX = kwargs['XtX']
                 pp = prior_precisions[gf].detach().expand(len(XtX), -1, -1)
                 # TODO: use torch.cholesky -> cholesky_solve
-                kwargs['Htild_inv'] = torch.inverse(XtX + pp)
+                kwargs['Htild_inv'] = self._calculate_htild_inv(XtX, pp)
 
             self.static_kwargs_per_gf[gf] = kwargs
+
+    def _calculate_htild_inv(self, XtX: torch.Tensor, pp: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
 
     def _initialize_kwargs(self, prior_precisions: Optional[dict] = None) -> dict:
         """
@@ -116,7 +119,7 @@ class ReSolver:
                 # Htild_inv was not precomputed, compute it here
                 XtX = kwargs['XtX']
                 pp = prior_precisions[gf].expand(len(XtX), -1, -1)
-                kwargs['Htild_inv'] = torch.inverse(XtX + pp)
+                kwargs['Htild_inv'] = self._calculate_htild_inv(XtX, pp)
 
         return kwargs_per_gf
 
@@ -226,7 +229,6 @@ class ReSolver:
             'res_per_gf': {gf: v.detach() for gf, v in res_per_gf.items()},
             'prev_offsets': {k: v.detach() for k, v in offsets.items() if k != '_fixed'}
         }
-        self._last_call_history = history
 
         return res_per_gf
 
