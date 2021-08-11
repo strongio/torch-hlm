@@ -130,18 +130,15 @@ class MixedEffectsModule(torch.nn.Module):
                 loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix,
                 validate_args=True  # TODO: profile this
             )
-        except ValueError as e:
-            if 'invalid' not in str(e):
-                raise e
-
-        if dist is None:
-            msg = f"eps of {eps} insufficient to ensure posdef covariance matrix for gf={grouping_factor}"
-            if eps < .01:
-                if eps > 1e-04:
-                    warn(f"{msg}, increasing 10x")
-                return self.re_distribution(grouping_factor, eps=eps * 10)
-            else:
-                raise RuntimeError(msg)
+        except (ValueError, RuntimeError) as e:
+            if dist is None:
+                msg = f"eps of {eps} insufficient to ensure posdef covariance matrix for gf={grouping_factor}"
+                if eps <= .1:
+                    if eps > 1e-04:
+                        warn(f"{msg}, increasing 10x")
+                    return self.re_distribution(grouping_factor, eps=eps * 5)
+                else:
+                    raise RuntimeError(msg) from e
         return dist
 
     # forward / re-solve -------

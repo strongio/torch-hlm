@@ -23,7 +23,8 @@ class BinomialReSolver(ReSolver):
         if max_iter is None:
             max_iter = 500 * len(design)
         super().__init__(X=X, y=y, group_ids=group_ids, weights=weights, design=design, max_iter=max_iter, **kwargs)
-        self.slow_start *= 5
+        if self.cg:
+            self.slow_start *= 5
 
     def _calculate_htild_inv(self, XtX: torch.Tensor, pp: torch.Tensor) -> torch.Tensor:
         return torch.inverse(.25 * XtX + pp)

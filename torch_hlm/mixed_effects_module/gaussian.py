@@ -214,7 +214,7 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
         return torch.cat(log_probs).sum()
 
 
-def _mvnorm_eps(loc, sigma_diag, cov, start_eps: float = .000001):
+def _mvnorm_eps(loc, sigma_diag, cov, start_eps: float = .000001) -> MultivariateNormal:
     mvnorm = None
     eps = start_eps
     while mvnorm is None:
@@ -222,7 +222,7 @@ def _mvnorm_eps(loc, sigma_diag, cov, start_eps: float = .000001):
             mvnorm = MultivariateNormal(
                 loc=loc, covariance_matrix=torch.diag_embed(sigma_diag + eps) + cov, validate_args=True
             )
-        except ValueError:
+        except (ValueError, RuntimeError):
             eps *= 10
         if eps > .01:
             raise
