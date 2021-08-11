@@ -38,7 +38,7 @@ class ReSolver:
                  verbose: bool = False,
                  max_iter: Optional[int] = None,
                  min_iter: int = 5,
-                 reltol: float = .001):
+                 tol: float = .001):
 
         self.X, self.y = validate_tensors(X, y)
         if weights is None:
@@ -56,7 +56,7 @@ class ReSolver:
         assert min_iter > 0
         self.max_iter = max_iter
         self.min_iter = min_iter
-        self.reltol = reltol
+        self.tol = tol
 
         self.slow_start = len(design) * slow_start * self.iterative
 
@@ -104,6 +104,7 @@ class ReSolver:
         for gf in self.design.keys():
             kwargs = kwargs_per_gf[gf] = self.static_kwargs_per_gf[gf].copy()
             kwargs['prior_precision'] = prior_precisions[gf]
+            kwargs['iter_'] = 1
 
             if self._warm_start:
                 # when this solver is used inside of MixedEffectsModule.fit_loop, we create an instance then
@@ -126,17 +127,6 @@ class ReSolver:
     def __call__(self,
                  fe_offset: torch.Tensor,
                  prior_precisions: Optional[dict] = None) -> Dict[str, torch.Tensor]:
-        """
-        Solve the random effects.
-
-        :param fe_offset: The offset that comes from the fixed-effects.
-        :param max_iter: The maximum number of iterations.
-        :param reltol: Relative (change/prev_val) tolerance for checking convergence.
-        :param prior_precisions: A dictionary with the precision matrices for each grouping factor.
-        :param kwargs: Other keyword arguments to `solve_step`
-        :return: A dictionary with random-effects for each grouping-factor
-        """
-
         kwargs_per_gf = self._initialize_kwargs(prior_precisions=prior_precisions)
 
         if self._warm_start:
@@ -146,21 +136,17 @@ class ReSolver:
         else:
             offsets = {'_fixed': fe_offset}
 
-        _start = time.time()
-
         prog = None
         if isinstance(self.verbose, str) and self.verbose.startswith('prog') and self.iterative:
             prog = tqdm(delay=20, total=self.max_iter)
 
+        _cache = {gf: {} for gf in self.grouping_factors}
+        changes_history = []
         history = []
         while True:
             history.append({})
-            iter_ = len(history)
             for gf in self.grouping_factors:
                 gf_kwargs = kwargs_per_gf[gf]
-
-                # slow start:
-                gf_kwargs['dampen'] = (iter_ / (float(self.slow_start) + iter_))
 
                 # recompute offset:
                 gf_kwargs['offset'] = torch.sum(torch.stack([v for gf2, v in offsets.items() if gf2 != gf], 1), 1)
@@ -171,58 +157,19 @@ class ReSolver:
                     continue
 
                 # recompute offset for other gfs:
-                _, group_idx = np.unique(gf_kwargs['group_ids'], return_inverse=True)
-                offsets[gf] = (gf_kwargs['X'] * gf_res[group_idx]).sum(1)
+                if 'group_idx' not in _cache[gf]:
+                    _, _cache[gf]['group_idx'] = np.unique(gf_kwargs['group_ids'], return_inverse=True)
+                offsets[gf] = (gf_kwargs['X'] * gf_res[_cache[gf]['group_idx']]).sum(1)
 
             # check convergence:
             if not self.iterative:
                 break
-
-            convergence = dict(self._check_convergence(history))
-            converged = iter_ >= self.min_iter
-            _verbose = {}
-            for gf, changes in convergence.items():
-                num_over = (changes > self.reltol).sum().item()
-                if num_over:
-                    converged = False
-                _verbose[gf] = num_over
-            if prog is not None:
-                prog.update()
-            elif self.verbose:
-                print(f"{type(self).__name__} - Iter {iter_} - Ngroups Relchanges>{self.reltol} {_verbose}")
-            if converged:
-                break
-            elif iter_ >= self.max_iter:
-                for gf, changes in convergence.items():
-                    unconverged = (changes > self.reltol).sum()
-                    if unconverged:
-                        warn(f"There are {unconverged:,} unconverged for {gf}, max-relchange {changes.max()}")
+            changes = dict(self._calculate_changes(history))
+            changes_history.append(changes)
+            if self._check_convergence(changes, iter_=len(history), prog=prog):
                 break
 
-            # if only a single grouping factor, can mask converged:
-            if len(self.grouping_factors) == 1:
-                gf = self.grouping_factors[0]
-                gf_convergence = convergence.get(gf)
-                if gf_convergence is not None:
-                    kwargs_per_gf[gf]['converged_mask'] = gf_convergence <= self.reltol
-
-            # # TODO: could handle multiple grouping factors if we masked rows then transformed these to groups
-            # #       below is too slow
-            # converged_mask = []
-            # for gf, gf_kwargs in kwargs_per_gf.items():
-            #     gf_changes = convergence.get(gf)
-            #     if gf_changes is None:
-            #         continue
-            #     _, group_idx = np.unique(gf_kwargs['group_ids_seq'], return_inverse=True)
-            #     converged_mask.append(gf_changes[group_idx] <= self.reltol)
-            # if converged_mask:
-            #     converged_mask = torch.all(torch.stack(converged_mask, 1), dim=1).to(torch.float)
-            #     for gf, gf_kwargs in kwargs_per_gf.items():
-            #         ngroups = len(gf_kwargs['Htild_inv'])
-            #         group_conv_counts = torch.zeros(ngroups).scatter_add(0, gf_kwargs['group_ids_seq'], converged_mask)
-            #         # TODO: memoize
-            #         group_counts = torch.zeros(ngroups).scatter_add(0, gf_kwargs['group_ids_seq'], torch.ones_like(converged_mask))
-            #         gf_kwargs['converged_mask'] = (group_conv_counts == group_counts)
+            self._update_kwargs(kwargs_per_gf, changes_history)
 
         res_per_gf = history[-1]
         self._warm_start = {
@@ -231,6 +178,17 @@ class ReSolver:
         }
 
         return res_per_gf
+
+    def _update_kwargs(self, kwargs_per_gf: dict, changes_history: Sequence[dict]) -> None:
+        for gf, gf_kwargs in kwargs_per_gf.items():
+            gf_kwargs['iter_'] += 1
+
+        # if only a single grouping factor, can mask converged:
+        if len(self.grouping_factors) == 1:
+            gf = self.grouping_factors[0]
+            gf_changes = changes_history[-1].get(gf)
+            if gf_changes is not None:
+                kwargs_per_gf[gf]['converged_mask'] = gf_changes <= self.tol
 
     def solve_step(self,
                    X: torch.Tensor,
@@ -241,8 +199,8 @@ class ReSolver:
                    prior_precision: torch.Tensor,
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
+                   iter_: int,
                    converged_mask: Optional[np.ndarray] = None,
-                   dampen: float = 1.0,
                    **kwargs
                    ) -> torch.Tensor:
         """
@@ -277,6 +235,7 @@ class ReSolver:
                 prior_precision=prior_precision[~converged_mask],
                 Htild_inv=Htild_inv[~converged_mask],
                 prev_res=prev_res[~converged_mask],
+                iter_=iter_,
                 **kwargs
             )
             return out
@@ -310,10 +269,11 @@ class ReSolver:
             weights=weights,
             grad=grad,
             Htild_inv=Htild_inv,
-            prior_precision=prior_precision
+            prior_precision=prior_precision,
+            **kwargs
         )
 
-        step = step * dampen
+        step = step * iter_ / (iter_ + float(self.slow_start))
 
         return prev_res + step
 
@@ -341,16 +301,39 @@ class ReSolver:
             mu: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
+    def _check_convergence(self, changes: dict, iter_: int, prog: Optional[tqdm]) -> bool:
+        converged = iter_ >= self.min_iter
+        _verbose = {}
+        for gf, gf_changes in changes.items():
+            num_over = (gf_changes > self.tol).sum().item()
+            if num_over:
+                converged = False
+            _verbose[gf] = num_over
+        if prog is not None:
+            prog.update()
+        elif self.verbose:
+            print(f"{type(self).__name__} - Iter {iter_} - Ngroups Changes>{self.tol} {_verbose}")
+
+        if converged:
+            return True
+        elif iter_ >= self.max_iter:
+            for gf, gf_changes in changes.items():
+                unconverged_mask = (gf_changes > self.tol)
+                if unconverged_mask.any():
+                    warn(f"There are {unconverged_mask.sum().item():,} unconverged "
+                         f"groups for {gf}, max-relchange {gf_changes.max()}")
+            return True
+        return False
+
     @torch.no_grad()
-    def _check_convergence(self, history: Sequence[dict]) -> Iterable[Tuple[str, torch.Tensor]]:
+    def _calculate_changes(self, history: Sequence[dict]) -> Iterable[Tuple[str, torch.Tensor]]:
         if len(history) < 2:
             return {}
         for gf in history[-1].keys():
             current_res = history[-1][gf]
             prev_res = history[-2][gf]
-            abs_changes = torch.norm(current_res - prev_res, dim=1)
+            abs_changes = (current_res - prev_res).abs()
             if torch.isinf(abs_changes).any() or torch.isnan(abs_changes).any():
-                raise RuntimeError("Convergence failed; nan/inf values")
-            prev_res_norm = torch.norm(prev_res, dim=1)
-            rel_changes = abs_changes / prev_res_norm.mean()
-            yield gf, rel_changes
+                raise RuntimeError(f"{type(self).__name__}: Optimization failed; nan/inf values")
+            # rel_changes = abs_changes / prev_res.abs()
+            yield gf, torch.max(abs_changes, 1).values

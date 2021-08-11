@@ -49,8 +49,8 @@ class GaussianReSolver(ReSolver):
                    prior_precision: torch.Tensor,
                    Htild_inv: torch.Tensor,
                    prev_res: Optional[torch.Tensor],
+                   iter_: int,
                    converged_mask: Optional[np.ndarray] = None,
-                   dampen: float = 1.0,
                    XtX: Optional[torch.Tensor] = None,
                    **kwargs
                    ) -> torch.Tensor:
@@ -65,7 +65,7 @@ class GaussianReSolver(ReSolver):
                 Htild_inv=Htild_inv,
                 prev_res=prev_res,
                 converged_mask=converged_mask,
-                dampen=dampen
+                iter_=iter_
             )
         else:
             assert converged_mask is None
