@@ -177,7 +177,9 @@ class MixedEffectsModule(torch.nn.Module):
                     # i.e. re_solve_data is empty
                     res_per_gf = {gf: torch.zeros((0, len(idx) + 1)) for gf, idx in self.rf_idx.items()}
 
-                res_per_gf_padded = pad_res_per_gf(res_per_gf, group_ids, rs_group_ids, verbose=not quiet)
+                res_per_gf_padded = pad_res_per_gf(
+                    res_per_gf, group_ids, rs_group_ids, fill_value=0., verbose=not quiet
+                )
 
                 return self.forward(
                     X=X, group_ids=group_ids, re_solve_data=None, res_per_gf=res_per_gf_padded, quiet=quiet

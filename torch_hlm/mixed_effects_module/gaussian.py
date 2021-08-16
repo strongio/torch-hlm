@@ -224,6 +224,6 @@ def _mvnorm_eps(loc, sigma_diag, cov, start_eps: float = .000001) -> Multivariat
             )
         except (ValueError, RuntimeError):
             eps *= 10
-        if eps > .01:
-            raise
+            if eps > .01:
+                raise
     return mvnorm

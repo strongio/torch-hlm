@@ -104,6 +104,7 @@ def get_to_kwargs(x) -> dict:
 def pad_res_per_gf(res_per_gf: Dict[str, torch.Tensor],
                    group_ids_predict: Sequence,
                    group_ids_solve: Sequence,
+                   fill_value: float,
                    verbose: bool = False) -> Dict[str, torch.Tensor]:
     # there is no requirement that all groups in `group_ids` are present in `group_data`, or vice versa, so
     # need to map the re_solve output
@@ -118,8 +119,11 @@ def pad_res_per_gf(res_per_gf: Dict[str, torch.Tensor],
         if set2 and verbose:
             print(f"there are {len(set2):,} groups in predict data but not in solve data")
 
-        res_per_gf_padded[gf] = torch.zeros(
-            (len(ugroups_target), res_per_gf[gf].shape[-1]), device=res_per_gf[gf].device, dtype=res_per_gf[gf].dtype
+        res_per_gf_padded[gf] = torch.full(
+            (len(ugroups_target), res_per_gf[gf].shape[-1]),
+            fill_value=fill_value,
+            device=res_per_gf[gf].device,
+            dtype=res_per_gf[gf].dtype
         )
         for gid_target, idx_target in ugroups_target.items():
             idx_solve = ugroups_solve.get(gid_target)

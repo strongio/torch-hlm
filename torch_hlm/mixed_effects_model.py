@@ -310,6 +310,7 @@ class MixedEffectsModel(BaseEstimator):
                 X: pd.DataFrame,
                 group_data: pd.DataFrame,
                 type: str = 'mean',
+                unknown_groups: str = 'zero',
                 **kwargs) -> np.ndarray:
         """
         :param X: A dataframe with the predictors for fixed and random effects, as well as the group-id column.
@@ -319,6 +320,10 @@ class MixedEffectsModel(BaseEstimator):
          example, for a binomial model, we will generate a ``torch.distributions.Binomial`` object, and the
          prediction output from this method will be an attribue of that (e.g. type='logits' would get the predicted
          logits). Default 'mean'.
+        :param unknown_groups: How should groups that are in ``group_ids`` but not ``group_data`` be handled?
+         Default is to "zero"-out the random-effects, which means only fixed-effects will be used. Other options are
+         "nan" (return `nan`s for these) or "raise" (raise an exception). Can prefix any of these options with "quiet"
+         to suppress printing the number of unknown groups.
         :return: An ndarray of predictions
         """
         if 'verbose' not in kwargs:
@@ -327,14 +332,28 @@ class MixedEffectsModel(BaseEstimator):
         re_solve_data = self.build_model_mats(group_data, expect_y=True)
 
         _, _, rs_group_ids, *_ = re_solve_data
+
         # solve random-effects:
         if len(rs_group_ids):
             res_per_gf = self.module_.get_res(*re_solve_data, **kwargs)
         else:
             # i.e. re_solve_data is empty
             res_per_gf = {gf: torch.zeros((0, len(idx) + 1)) for gf, idx in self.module_.rf_idx.items()}
-        res_per_gf_padded = pad_res_per_gf(res_per_gf, group_ids, rs_group_ids, verbose=kwargs['verbose'])
 
+        res_per_gf_padded = pad_res_per_gf(
+            res_per_gf, group_ids, rs_group_ids, fill_value=float('nan'), verbose=not unknown_groups.startswith('quiet')
+        )
+        unknown_groups = unknown_groups.replace('quiet', '').lstrip('_')
+        assert unknown_groups in {'zero', 'nan', 'raise'}
+        if unknown_groups == 'raise':
+            for res in res_per_gf_padded.values():
+                if torch.isnan(res).any():
+                    raise RuntimeError("There are groups in ``group_ids`` that are not in ``group_data``")
+        elif unknown_groups == 'zero':
+            for res in res_per_gf_padded.values():
+                res[torch.isnan(res)] = 0.
+
+        # predict:
         dist = self.module_.predict_distribution_mode(X, group_ids=group_ids, res_per_gf=res_per_gf_padded)
         pred = getattr(dist, type)
         return pred.numpy()

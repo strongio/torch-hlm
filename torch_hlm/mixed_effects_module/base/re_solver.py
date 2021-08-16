@@ -166,7 +166,7 @@ class ReSolver:
                 break
             changes = dict(self._calculate_changes(history))
             changes_history.append(changes)
-            if self._check_convergence(changes, iter_=len(history), prog=prog):
+            if self._check_convergence(changes_history, iter_=len(history), prog=prog):
                 break
 
             self._update_kwargs(kwargs_per_gf, changes_history)
@@ -301,10 +301,10 @@ class ReSolver:
             mu: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def _check_convergence(self, changes: dict, iter_: int, prog: Optional[tqdm]) -> bool:
+    def _check_convergence(self, changes_history: Sequence[dict], iter_: int, prog: Optional[tqdm]) -> bool:
         converged = iter_ >= self.min_iter
         _verbose = {}
-        for gf, gf_changes in changes.items():
+        for gf, gf_changes in changes_history[-1].items():
             num_over = (gf_changes > self.tol).sum().item()
             if num_over:
                 converged = False
@@ -317,7 +317,7 @@ class ReSolver:
         if converged:
             return True
         elif iter_ >= self.max_iter:
-            for gf, gf_changes in changes.items():
+            for gf, gf_changes in changes_history[-1].items():
                 unconverged_mask = (gf_changes > self.tol)
                 if unconverged_mask.any():
                     warn(f"There are {unconverged_mask.sum().item():,} unconverged "
@@ -332,8 +332,8 @@ class ReSolver:
         for gf in history[-1].keys():
             current_res = history[-1][gf]
             prev_res = history[-2][gf]
-            abs_changes = (current_res - prev_res).abs()
+            abs_changes = torch.norm(current_res - prev_res, dim=1)
             if torch.isinf(abs_changes).any() or torch.isnan(abs_changes).any():
                 raise RuntimeError(f"{type(self).__name__}: Optimization failed; nan/inf values")
             # rel_changes = abs_changes / prev_res.abs()
-            yield gf, torch.max(abs_changes, 1).values
+            yield gf, abs_changes
