@@ -79,15 +79,13 @@ class TestTraining(unittest.TestCase):
         print(covariance)
         raneff_design = {f"g{i + 1}": [f'x{_ + 1}' for _ in range(n)] for i, n in enumerate(num_res)}
         model = MixedEffectsModel(
-            fixeff_cols=[],
+            fixeffs=[],
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design=raneff_design,
-            response_col='y',
-            weight_col='n',
             loss_type='iid',
             covariance=covariance
         )
-        model.fit(df_train)
+        model.fit(X=df_train, y=df_train.loc[:, ['y', 'n']])
 
         # COMPARE TRUE vs. EST -----
         self.assertLess(abs(model.module_.fixed_effects_nn.bias - intercept), .14 * len(num_res))
@@ -95,7 +93,7 @@ class TestTraining(unittest.TestCase):
         assert not len(wt)  # haven't set up unit-tests for this
 
         with torch.no_grad():
-            res_per_g = model.module_.get_res(*model.build_model_mats(df_train))
+            res_per_g = model.module_.get_res(*model.build_model_mats(df_train, df_train.loc[:, ['y', 'n']]))
             df_raneff_est = []
             for gf, re_mat in res_per_g.items():
                 df_raneff_est.append(
@@ -179,15 +177,13 @@ class TestTraining(unittest.TestCase):
             optimize_cov = False
 
         model = MixedEffectsModel(
-            fixeff_cols=predictors,
+            fixeffs=predictors,
             response_type='binomial' if response_type.startswith('bin') else 'gaussian',
             raneff_design={'group': predictors},
-            response_col='y',
-            weight_col='n',
             covariance='log_cholesky' if optimize_cov else true_cov,
             loss_type=loss_type,
         )
-        model.fit(df_train)
+        model.fit(X=df_train, y=df_train.loc[:,['y','n']])
 
         # COMPARE TRUE vs. EST -----
         # fixed effects:
@@ -210,7 +206,7 @@ class TestTraining(unittest.TestCase):
         # posterior modes:
         with torch.no_grad():
             df_raneff_est = pd.DataFrame(
-                model.module_.get_res(*model.build_model_mats(df_train))['group'].numpy(),
+                model.module_.get_res(*model.build_model_mats(df_train,df_train.loc[:,['y','n']]))['group'].numpy(),
                 columns=df_raneff_true.columns[0:-1])
             df_raneff_est['group'] = df_raneff_true['group']
 

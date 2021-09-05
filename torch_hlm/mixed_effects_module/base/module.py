@@ -36,6 +36,8 @@ class MixedEffectsModule(torch.nn.Module):
     default_loss_type: str = None
     _nm2cls = {}
 
+    resp_ndim = 1
+
     def __init_subclass__(cls, **kwargs):
         cls._nm2cls[cls.__name__.replace('MixedEffectsModule', '').lower()] = cls
 
@@ -149,15 +151,15 @@ class MixedEffectsModule(torch.nn.Module):
                 res_per_gf: Optional[Union[dict, torch.Tensor]] = None,
                 quiet: bool = False) -> torch.Tensor:
         """
-
         :param X: A 2D model-matrix Tensor
         :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
-        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
-        :param re_solve_data: A tuple of (X,y,group_ids[,weights]) that will be used for establishing the ran-effects.
-        :param res_per_gf: Instead of passing `re_solve_data` and having the module solve the random-effects per
-        group, can alternatively pass these random-effects. This should be a dictionary whose keys are grouping-factors
-        and whose values are tensors. Each tensor's row corresponds to the groups for that grouping factor, in sorted
-        order. If there is only one grouping factor, can pass a tensor instead of a dict.
+         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of
+         group-labels
+        :param re_solve_data: A tuple of (X,group_ids,y,[,weights]) that will be used for establishing the ran-effects.
+        :param res_per_gf: Instead of passing ``re_solve_data`` and having the module solve the random-effects per
+         group, can alternatively pass these random-effects. This should be a dictionary whose keys are
+         grouping-factors and whose values are tensors. Each tensor's row corresponds to the groups for that grouping
+         factor, in sorted order. If there is only one grouping factor, can pass a tensor instead of a dict.
         :return: Tensor of predictions
         """
         X, = validate_tensors(X)
@@ -165,7 +167,7 @@ class MixedEffectsModule(torch.nn.Module):
         if res_per_gf is None:
             if re_solve_data is None:
                 raise TypeError("Must pass one of `re_solve_data`, `res_per_gf`; got neither.")
-            _, _, rs_group_ids, *_ = re_solve_data
+            _, rs_group_ids, *_ = re_solve_data
             group_ids = validate_group_ids(group_ids, num_grouping_factors=len(self.grouping_factors))
             rs_group_ids = validate_group_ids(rs_group_ids, num_grouping_factors=len(self.grouping_factors))
 
@@ -218,12 +220,13 @@ class MixedEffectsModule(torch.nn.Module):
 
         :param X: Model-matrix
         :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
-        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of
+         group-labels
         :param re_solve_data: A tuple of (X,y,group_ids[,weights]) that will be used for establishing the ran-effects.
         :param res_per_gf: Instead of passing `re_solve_data` and having the module solve the random-effects per
-        group, can alternatively pass these random-effects. This should be a dictionary whose keys are grouping-factors
-        and whose values are tensors. Each tensor's row corresponds to the groups for that grouping factor, in sorted
-        order. If there is only one grouping factor, can pass a tensor instead of a dict.
+         group, can alternatively pass these random-effects. This should be a dictionary whose keys are
+         grouping-factors and whose values are tensors. Each tensor's row corresponds to the groups for that grouping
+         factor, in sorted order. If there is only one grouping factor, can pass a tensor instead of a dict.
         :param kwargs: Other arguments to pass to the distribution's init.
         :return: A ``torch.distributions.Distribution``
         """
@@ -237,8 +240,8 @@ class MixedEffectsModule(torch.nn.Module):
 
     def get_res(self,
                 X: torch.Tensor,
-                y: torch.Tensor,
                 group_ids: Sequence,
+                y: torch.Tensor,
                 weights: Optional[torch.Tensor] = None,
                 **kwargs) -> Dict[str, torch.Tensor]:
         """
@@ -246,10 +249,11 @@ class MixedEffectsModule(torch.nn.Module):
         :param X: A 2D model-matrix Tensor
         :param y: A 1D target/response Tensor.
         :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
-        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of
+         group-labels.
         :param weights: Optional sample-weights.
         :return: A dictionary with grouping-factors as keys and random-effects tensors as values. These tensors have
-        rows corresponding to the sorted group_ids.
+         rows corresponding to the sorted group_ids.
         """
         X, y = validate_tensors(X, y)
 
@@ -380,7 +384,7 @@ class MixedEffectsModule(torch.nn.Module):
         re_dist = self.re_distribution(gf)
 
         if 'white_noise' not in cache:
-            cache['white_noise'] = torch.randn((nsim, re_dist.event_shape[0]))  # .clamp(-3.5, 3.5)
+            cache['white_noise'] = torch.randn((nsim, re_dist.event_shape[0]))
 
         if f'x_r_{gf}' not in cache:
             cache[f'Xr_{gf}'] = torch.cat([torch.ones((len(X), 1)), X[:, self.rf_idx[gf]]], 1)
@@ -398,8 +402,8 @@ class MixedEffectsModule(torch.nn.Module):
         # log_integrand = y_dist.log_prob(y.unsqueeze(-1))
         log_integrand = self._get_iid_log_probs(
             pred=yhat_samples,
-            actual=y.unsqueeze(-1),
-            weights=weights.unsqueeze(-1)  # TODO: confirm OK for gaussian
+            actual=y.unsqueeze(-1),  # <------ TODO: assuming 1d, sklearn-convention but not pytorch convention
+            weights=weights.unsqueeze(-1)
         )
 
         ngroups = cache['group_ids_seq'].max() + 1
@@ -423,7 +427,8 @@ class MixedEffectsModule(torch.nn.Module):
         :param X: A 2D model-matrix Tensor
         :param y: A 1D target/response Tensor.
         :param group_ids: A sequence which assigns each row in X to its group(s) -- e.g. a 2d ndarray or a list of
-        tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of group-labels
+         tuples of group-labels. If there is only one grouping factor, this can be a 1d ndarray or a list of
+         group-labels
         :param cache: Dictionary of cached objects that don't need to be re-created each call (e.g. ``ReSolver``)
         :return: The log-prob for the data.
         """
@@ -465,9 +470,9 @@ class MixedEffectsModule(torch.nn.Module):
 
     def _get_re_penalty(self) -> Union[float, torch.Tensor]:
         """
-        In some settings, optimization will fail because the variance on some random effects
-        is too high (e.g. if there are a very large number of observations per group, the random-intercept might have
-        high variance) which causes numerical issues. Setting `re_scale_penalty>0` can help in these cases. This
+        In some settings, optimization will fail because the variance on some random effects is too high
+        (e.g. if there are a very large number of observations per group, the random-intercept might have high
+        variance) which causes numerical issues. Setting `re_scale_penalty>0` can help in these cases.
         """
         penalties = []
         for gf, precision in self.re_scale_penalty.items():

@@ -111,17 +111,6 @@ class BinomialReSolver(ReSolver):
         var = (mu * (1. - mu))
         return var * weights * X.t() @ X
 
-    def _update_kwargs(self, kwargs_per_gf: dict, changes_history: Sequence[dict]) -> None:
-        super(BinomialReSolver, self)._update_kwargs(kwargs_per_gf, changes_history)
-        for gf, gf_kwargs in kwargs_per_gf.items():
-            gf_changes = changes_history[-1].get(gf)
-            if gf_changes is not None and self.cg:
-                # when close to convergence, disable cg
-                cg_mask = gf_changes > self.tol * 5
-                converged_mask = gf_kwargs.get('converged_mask')
-                if converged_mask is not None:
-                    cg_mask = cg_mask[~converged_mask]
-                kwargs_per_gf[gf]['cg'] = cg_mask
 
 
 class BinomialMixedEffectsModule(MixedEffectsModule):
