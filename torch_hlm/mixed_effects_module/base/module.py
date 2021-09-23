@@ -28,8 +28,6 @@ class MixedEffectsModule(torch.nn.Module):
      is too high (e.g. if there are a very large number of observations per group, the random-intercept might have
      high variance) which causes numerical issues. Setting `re_scale_penalty>0` can help in these cases. This
      corresponds to a half-normal prior on the random-effect std-devs, with precision = re_scale_penalty.
-    :param verbose: Verbosity level; 1 (default) prints the loss on each optimization epoch; 0 disables everything,
-     and 2 allows messages from the inner random-effects solver.
     """
 
     solver_cls: Type['ReSolver'] = None

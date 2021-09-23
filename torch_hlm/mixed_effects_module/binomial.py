@@ -112,7 +112,6 @@ class BinomialReSolver(ReSolver):
         return var * weights * X.t() @ X
 
 
-
 class BinomialMixedEffectsModule(MixedEffectsModule):
     solver_cls = BinomialReSolver
 

@@ -11,7 +11,7 @@ from .base import MixedEffectsModule, ReSolver
 from .utils import chunk_grouped_data, validate_tensors, validate_group_ids
 from torch.distributions import MultivariateNormal
 
-from torch_hlm.low_rank import LowRankMultivariateNormal
+from torch_hlm.low_rank import WoodburyMultivariateNormal
 
 
 class GaussianReSolver(ReSolver):
@@ -196,11 +196,13 @@ class GaussianMixedEffectsModule(MixedEffectsModule):
             if len(loc.shape) > 2:
                 loc = loc.squeeze(-1)
 
-            # mvnorm = LowRankMultivariateNormal(
+            # import pdb
+            # pdb.set_trace()
+            # mvnorm = WoodburyMultivariateNormal(
             #     loc=loc,
-            #     cov_diag=self.residual_var * torch.eye(r).expand(ng, -1, -1)/w_r.sqrt().unsqueeze(-1),
-            #     cov_factor=Z_r,
-            #     cov_factor_inner=re_dist.covariance_matrix.expand(ng, -1, -1),
+            #     sigma_diag=self.residual_var * 1 / w_r.sqrt(),
+            #     Z=Z_r,
+            #     re_precision=re_dist.precision_matrix.expand(ng, -1, -1),
             #     validate_args=False
             # )
             cov_r = Z_r @ re_dist.covariance_matrix.expand(ng, -1, -1) @ Z_r.permute(0, 2, 1)

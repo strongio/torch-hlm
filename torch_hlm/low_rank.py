@@ -1,80 +1,107 @@
+import functools
+
+import math
+
 from typing import Optional
 
 import torch
-from torch import Tensor
-from torch.distributions import LowRankMultivariateNormal as TorchLowRankMultivariateNormal, Distribution, constraints
+from torch.distributions import Distribution, constraints
 from torch.distributions.utils import lazy_property
 
 
-class LowRankMultivariateNormal(Distribution):
-    r"""
-        Creates a multivariate normal distribution with covariance matrix having a low-rank form
-        parameterized by :attr:`cov_factor`, :attr:`cov_diag`, and :attr:`cov_factor_inner`::
-
-            covariance_matrix = cov_diag + cov_factor @ cov_factor_inner @ cov_factor.T
-
+class WoodburyMultivariateNormal(Distribution):
     """
+    sigma_diag + Z re_precision^{-1} Z'
+    """
+
     arg_constraints = {
         "loc": constraints.real_vector,
-        "cov_factor": constraints.independent(constraints.real, 2),
-        "cov_diag": constraints.independent(constraints.positive, 1),
-        "cov_factor_inner": constraints.positive_definite
+        "Z": constraints.independent(constraints.real, 2),
+        "sigma_diag": constraints.independent(constraints.positive, 1),
+        "re_precision": constraints.positive_definite
     }
     support = constraints.real_vector
-    has_rsample = False
+    has_rsample = True
 
     def __init__(self,
-                 loc: Tensor,
-                 cov_factor: Tensor,
-                 cov_diag: Tensor,
-                 cov_factor_inner: Optional[Tensor] = None,
+                 loc: torch.Tensor,
+                 sigma_diag: torch.Tensor,
+                 Z: torch.Tensor,
+                 re_precision: torch.Tensor,
                  validate_args: Optional[bool] = None):
 
         if loc.dim() < 1:
             raise ValueError("loc must be at least one-dimensional.")
         event_shape = loc.shape[-1:]
 
-        if cov_factor.dim() < 2:
-            raise ValueError("cov_factor must be at least two-dimensional, "
-                             "with optional leading batch dimensions")
-        if cov_factor.shape[-2:-1] != event_shape:
-            raise ValueError("cov_factor must be a batch of matrices with shape {} x m"
-                             .format(event_shape[0]))
-        if cov_diag.shape[-1:] != event_shape:
-            raise ValueError("cov_diag must be a batch of vectors with shape {}".format(event_shape))
-        if cov_factor_inner is None:
-            raise NotImplementedError("TODO: identity matrix")
-        else:
-            pass  # TODO: validate
+        if Z.dim() < 2:
+            raise ValueError("``Z`` must be at least two-dimensional, with optional leading batch dimensions")
+        if Z.shape[-2:-1] != event_shape:
+            raise ValueError("``Z`` must be a batch of matrices with shape {} x m".format(event_shape[0]))
+        if sigma_diag.shape[-1:] != event_shape:
+            raise ValueError("``sigma_diag`` must be a batch of vectors with shape {}".format(event_shape))
+        # todo: validate re_precision
 
         loc_ = loc.unsqueeze(-1)
-        cov_diag_ = cov_diag.unsqueeze(-1)
+        sigma_diag_ = sigma_diag.unsqueeze(-1)
         try:
-            loc_, self.cov_factor, cov_diag_, self.cov_factor_inner = torch.broadcast_tensors(
-                loc_, cov_factor, cov_diag_, cov_factor_inner
-            )
+            loc_, self.Z, sigma_diag_ = torch.broadcast_tensors(loc_, Z, sigma_diag_)
         except RuntimeError as e:
-            raise ValueError("Incompatible batch shapes: loc {}, cov_factor {}, cov_diag {}, cov_factor_inner_ {}"
-                             .format(loc.shape, cov_factor.shape, cov_diag.shape, self.cov_factor_inner.shape)) from e
+            raise ValueError(
+                "Incompatible batch shapes: loc {}, Z {}, sigma_diag {}".format(
+                    loc.shape, Z.shape, sigma_diag.shape
+                )
+            ) from e
         self.loc = loc_[..., 0]
-        self.cov_diag = cov_diag_[..., 0]
+        self.sigma_diag = sigma_diag_[..., 0]  # A^-1
+        self.re_precision = re_precision  # B
         batch_shape = self.loc.shape[:-1]
+        # TODO: broadcast re_precision to batch_shape
 
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
 
+    @functools.cached_property
+    def O(self) -> torch.Tensor:
+        return self.re_precision + (self.sigma_diag.unsqueeze(-1) * self.Z).permute(0, 2, 1) @ self.Z
+
+    # @functools.cached_property
+    # def A(self) -> torch.Tensor:
+    #     return torch.diag_embed(1 / self.sigma_diag)
+
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        if self._validate_args:
+            self._validate_sample(value)
+        import pdb
+        pdb.set_trace()
+        diff = value - self.loc
+        manhalob = (diff * self._lr_solve(diff)).sum(1)
+        n = len(value)
+        return n * torch.log(torch.tensor(2 * math.pi)) + self._logdet() + manhalob
+
+    def _lr_solve(self, x) -> torch.Tensor:
+        A_x = torch.diag_embed((1 / self.sigma_diag * x))
+        return A_x - 1 / self.sigma_diag * self.Z @ torch.linalg.solve(self.O, (self.Z @ A_x))
+
+    def _logdet(self) -> torch.Tensor:
+        A = torch.diag_embed(1 / self.sigma_diag)  # TODO
+        return torch.linalg.slogdet(self.O)[1] - \
+               torch.linalg.slogdet(A)[1] - \
+               torch.linalg.slogdet(self.re_precision)[1]
+
     def expand(self, batch_shape, _instance=None):
-        new = self._get_checked_instance(LowRankMultivariateNormal, _instance)
-        batch_shape = torch.Size(batch_shape)
-        loc_shape = batch_shape + self.event_shape
-        new.loc = self.loc.expand(loc_shape)
-        new.cov_diag = self.cov_diag.expand(loc_shape)
-        new.cov_factor = self.cov_factor.expand(loc_shape + self.cov_factor.shape[-1:])
-        new.cov_factor_inner = self.cov_factor_inner.expand(loc_shape + self.cov_factor_inner.shape[-1:])
-        super(LowRankMultivariateNormal, new).__init__(batch_shape,
-                                                       self.event_shape,
-                                                       validate_args=False)
-        new._validate_args = self._validate_args
-        return new
+        raise NotImplementedError("TODO")
+        # new = self._get_checked_instance(WoodburyMultivariateNormal, _instance)
+        # batch_shape = torch.Size(batch_shape)
+        # loc_shape = batch_shape + self.event_shape
+        # new.loc = self.loc.expand(loc_shape)
+        # new.cov_diag = self.cov_diag.expand(loc_shape)
+        # new.cov_factor = self.cov_factor.expand(loc_shape + self.cov_factor.shape[-1:])
+        # new.cov_factor_inner = self.cov_factor_inner.expand(loc_shape + self.cov_factor_inner.shape[-1:])
+        # super().__init__(batch_shape,
+        #                                                self.event_shape,
+        #                                                validate_args=False)
+        # new._validate_args = self._validate_args
+        # return new
 
     @property
     def mean(self):
@@ -87,35 +114,10 @@ class LowRankMultivariateNormal(Distribution):
     @lazy_property
     def covariance_matrix(self):
         raise NotImplementedError("TODO")
-        # covariance_matrix = (torch.matmul(self._unbroadcasted_cov_factor,
-        #                                   self._unbroadcasted_cov_factor.transpose(-1, -2))
-        #                      + torch.diag_embed(self._unbroadcasted_cov_diag))
-        # return covariance_matrix.expand(self._batch_shape + self._event_shape +
-        #                                 self._event_shape)
 
     @lazy_property
     def precision_matrix(self):
         raise NotImplementedError("TODO")
 
-    def log_prob(self, value):
-        if self._validate_args:
-            self._validate_sample(value)
-        diff = value - self.loc
-        raise NotImplementedError("TODO")
-
-    # implemented in original ---
     def rsample(self, sample_shape=torch.Size()):
-        raise NotImplementedError
-
-    def entropy(self):
-        raise NotImplementedError
-
-    # not implemented in original ---
-    def cdf(self, value):
-        raise NotImplementedError
-
-    def icdf(self, value):
-        raise NotImplementedError
-
-    def enumerate_support(self, expand=True):
-        raise NotImplementedError
+        raise NotImplementedError("TODO")
