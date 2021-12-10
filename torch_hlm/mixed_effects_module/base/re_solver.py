@@ -9,6 +9,7 @@ import numpy as np
 from scipy.stats import rankdata
 
 from ..utils import chunk_grouped_data, validate_group_ids, validate_tensors
+from ... import options
 
 
 class ReSolver:
@@ -24,7 +25,6 @@ class ReSolver:
     precision-matrices are being fed into an optimizer, then these should instead be passed to __call__
     """
     _warm_start_jitter = .01
-    _grad_clamp = 5
     iterative: bool
 
     def __init__(self,
@@ -251,11 +251,12 @@ class ReSolver:
         grad_els = self._calculate_grad(X, y, mu)
 
         if self.verbose:
-            _num_clamped = (grad_els.abs() > self._grad_clamp).sum().item()
+            _num_clamped = (grad_els.abs() > options['re_solver_grad_clamp']).sum().item()
             if _num_clamped:
-                print(f"Clamped grad for {_num_clamped:,} elements to abs<={self._grad_clamp}")
-                # print(step[step.abs() > self._grad_clamp])
-        grad_els = grad_els.clamp(-self._grad_clamp, self._grad_clamp) * weights.unsqueeze(-1)
+                print(f"Clamped grad for {_num_clamped:,} elements to abs<={options['re_solver_grad_clamp']}")
+                # print(step[step.abs() > options['re_solver_grad_clamp']])
+        grad_els = grad_els.clamp(-options['re_solver_grad_clamp'],
+                                  options['re_solver_grad_clamp']) * weights.unsqueeze(-1)
 
         group_ids_broad = group_ids_seq.unsqueeze(-1).expand(-1, num_res)
         grad_no_pen = torch.zeros_like(prev_res).scatter_add(0, group_ids_broad, grad_els)
