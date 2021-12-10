@@ -13,7 +13,7 @@ setuptools.setup(
     packages=setuptools.find_packages(include='torch_hlm.*'),
     zip_safe=False,
     install_requires=[
-        'torch>=1.1',
+        'torch>=1.9',
         'numpy>=1.4',
         'tqdm>=4.0',
         'scipy>=1.5.2',

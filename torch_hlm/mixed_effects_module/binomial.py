@@ -134,7 +134,7 @@ class BinomialMixedEffectsModule(MixedEffectsModule):
             raise ValueError("expected Binomial values to be 0-1, did you pass counts instead of proportions?")
         weights_gr1 = weights > 1
         if weights_gr1.any():
-            if torch.isin(actual[weights_gr1], torch.tensor([0, 1])).all():
+            if torch.logical_or(actual[weights_gr1] == 0, actual[weights_gr1] == 1).all():
                 warn("All values are exactly 0 or 1; did you pass counts instead of probabilities?")
         dist = self._forward_to_distribution(pred, total_count=weights, validate_args=False)
         log_probs = dist.log_prob(actual * weights)
