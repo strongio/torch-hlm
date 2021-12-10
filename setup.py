@@ -18,7 +18,13 @@ setuptools.setup(
         'tqdm>=4.0',
         'scipy>=1.5.2',
         'scikit-learn>=0.23.2',
-        'pandas>=1.0'
+        'pandas>=1.0',
+        'backports.cached-property'  # TODO: only if python < 3.8
     ],
-    python_requires='>=3.8'
+    extras_require={
+        'tests': [
+            'parameterized'
+        ]
+    },
+    python_requires='>=3.6'
 )

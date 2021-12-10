@@ -1,5 +1,3 @@
-import functools
-
 import math
 
 from typing import Optional
@@ -7,6 +5,11 @@ from typing import Optional
 import torch
 from torch.distributions import Distribution, constraints
 from torch.distributions.utils import lazy_property
+
+try:
+    from functools import cached_property
+except ImportError:
+    from backports.cached_property import cached_property
 
 
 class WoodburyMultivariateNormal(Distribution):
@@ -60,7 +63,7 @@ class WoodburyMultivariateNormal(Distribution):
 
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
 
-    @functools.cached_property
+    @cached_property
     def O(self) -> torch.Tensor:
         return self.re_precision + (self.sigma_diag.unsqueeze(-1) * self.Z).permute(0, 2, 1) @ self.Z
 

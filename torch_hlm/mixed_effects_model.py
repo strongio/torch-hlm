@@ -1,4 +1,7 @@
-from functools import cached_property
+try:
+    from functools import cached_property
+except ImportError:
+    from backports.cached_property import cached_property
 from time import sleep
 from typing import Sequence, Optional, Type, Collection, Callable, Tuple, Dict, Union
 from warnings import warn
