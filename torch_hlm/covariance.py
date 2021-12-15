@@ -53,7 +53,7 @@ class LogCholeskyCov(Covariance):
 
     def set(self, tens: torch.Tensor) -> 'LogCholeskyCov':
         tens = tens.to(**get_to_kwargs(self))
-        L = torch.cholesky(tens)
+        L = torch.linalg.cholesky(tens)
         with torch.no_grad():
             self.cholesky_log_diag[:] = L.diag().log()
             self.cholesky_off_diag[:] = L[tuple(torch.tril_indices(len(L), len(L), offset=-1))]
