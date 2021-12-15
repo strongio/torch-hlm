@@ -50,7 +50,7 @@ class TestTraining(unittest.TestCase):
             df_raneff_true.append(df_raneff_true_g.assign(gf=f"g{i + 1}"))
 
         #
-        df_train = functools.reduce(lambda x, y: x.merge(y, how='cross'), df_train)
+        df_train = functools.reduce(cross_join, df_train)
         df_train['y'] = intercept
         for i in range(len(num_res)):
             df_train['y'] += df_train.pop(f"g{i + 1}_y")
@@ -183,7 +183,7 @@ class TestTraining(unittest.TestCase):
             covariance='log_cholesky' if optimize_cov else true_cov,
             loss_type=loss_type,
         )
-        model.fit(X=df_train, y=df_train.loc[:,['y','n']])
+        model.fit(X=df_train, y=df_train.loc[:, ['y', 'n']])
 
         # COMPARE TRUE vs. EST -----
         # fixed effects:
@@ -206,7 +206,7 @@ class TestTraining(unittest.TestCase):
         # posterior modes:
         with torch.no_grad():
             df_raneff_est = pd.DataFrame(
-                model.module_.get_res(*model.build_model_mats(df_train,df_train.loc[:,['y','n']]))['group'].numpy(),
+                model.module_.get_res(*model.build_model_mats(df_train, df_train.loc[:, ['y', 'n']]))['group'].numpy(),
                 columns=df_raneff_true.columns[0:-1])
             df_raneff_est['group'] = df_raneff_true['group']
 
@@ -223,3 +223,7 @@ class TestTraining(unittest.TestCase):
         except AssertionError:
             print(df_corr)
             raise
+
+
+def cross_join(x: pd.DataFrame, y: pd.DataFrame) -> pd.DataFrame:
+    return x.assign(_cross=0).merge(y.assign(_cross=0), on=['_cross']).drop(columns=['_cross'])
