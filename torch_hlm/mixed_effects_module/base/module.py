@@ -291,6 +291,16 @@ class MixedEffectsModule(torch.nn.Module):
                  loss_type: Optional[str] = None,
                  callbacks: Collection[Callable] = (),
                  **kwargs) -> Iterator[float]:
+        """
+        :param X: Model-matrix
+        :param y: Response
+        :param group_ids: A sequence of tuples, aligned with the model-matrix/response, indicating group-membership.
+        :param optimizer: The optimizer instance to use for fitting.
+        :param weights: Optional tensor of sample-weights.
+        :param loss_type: A string indicating the loss-type setting.
+        :param callbacks: A list of callables to call on each epoch.
+        :param kwargs: Keyword-arguments passed to ``get_loss()``.
+        """
 
         X, y = validate_tensors(X, y)
         group_ids = validate_group_ids(group_ids, len(self.grouping_factors))

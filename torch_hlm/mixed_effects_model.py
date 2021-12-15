@@ -137,6 +137,7 @@ class MixedEffectsModel(BaseEstimator):
          ``partial_fit()`` behavior, this default to 1, so that a single call to ``partial_fit()`` performs a single
          epoch.
         :param clip_grad: TODO
+        :param kwargs: Further keyword arguments passed to ``MixedEffectsModule.fit_loop()``
         :return: This instance
         """
         if self.module_ is None:
@@ -321,34 +322,37 @@ class MixedEffectsModel(BaseEstimator):
     @torch.no_grad()
     def predict(self,
                 X: pd.DataFrame,
-                group_data: Tuple[pd.DataFrame, np.ndarray],
+                group_data: Optional[Tuple[pd.DataFrame, np.ndarray]],
                 type: str = 'mean',
                 unknown_groups: str = 'zero',
                 **kwargs) -> np.ndarray:
         """
         :param X: A dataframe with the predictors for fixed and random effects, as well as the group-id column.
         :param group_data: Historical data -- an (X,y) tuple -- that will be used to obtain RE-estimates for each
-         group, which will then be used to generate predictions for X.
+         group, which will then be used to generate predictions for X. Can pass ``None`` if there's no historical data.
         :param type: What type of prediction? This can be any attribute of the distribution being predicted. For
          example, for a binomial model, we will generate a ``torch.distributions.Binomial`` object, and the
-         prediction output from this method will be an attribue of that (e.g. type='logits' would get the predicted
+         prediction output from this method will be an attribute of that (e.g. type='logits' would get the predicted
          logits). Default 'mean'.
         :param unknown_groups: How should groups that are in ``group_ids`` but not ``group_data`` be handled?
          Default is to "zero"-out the random-effects, which means only fixed-effects will be used. Other options are
-         "nan" (return `nan`s for these) or "raise" (raise an exception). Can prefix any of these options with "quiet"
+         "nan" (return `nan`s for these) or "raise" (raise an exception). Can prefix the first two options with "quiet"
          to suppress printing the number of unknown groups.
         :return: An ndarray of predictions
         """
         if 'verbose' not in kwargs:
             kwargs['verbose'] = 'prog'
         X, group_ids, *_ = self.build_model_mats(X)
-        if not isinstance(group_data, (tuple, list)):
-            raise TypeError("Expected ``group_data`` to be a X,y tuple.")
-        re_solve_data = self.build_model_mats(*group_data)
-
-        _, rs_group_ids, *_ = re_solve_data
 
         # solve random-effects:
+        if group_data is not None:
+            if not isinstance(group_data, (tuple, list)):
+                raise TypeError("Expected ``group_data`` to be a X,y tuple.")
+            re_solve_data = self.build_model_mats(*group_data)
+            _, rs_group_ids, *_ = re_solve_data
+        else:
+            rs_group_ids = np.empty((0, len(self.grouping_factors)), dtype='int')
+
         if len(rs_group_ids):
             res_per_gf = self.module_.get_res(*re_solve_data, **kwargs)
         else:
