@@ -88,6 +88,7 @@ class MixedEffectsModel(BaseEstimator):
             X: Union[pd.DataFrame, np.ndarray],
             y: np.ndarray,
             reset: str = 'warn',
+            verbose: bool = True,
             **kwargs) -> 'MixedEffectsModel':
         """
         Initialize and fit the underlying `MixedEffectsModule` until loss converges.
@@ -95,6 +96,7 @@ class MixedEffectsModel(BaseEstimator):
         :param X: A array/dataframe with the predictors for fixed and random effects and the group-id column(s).
         :param y: An array/dataframe with the response.
         :param reset: For multiple calls to fit, should we reset? Defaults to yes with a warning.
+        :param verbose:
         :param kwargs: Further keyword-args to pass to ``partial_fit()``
         :return: This instance, now fitted.
         """
@@ -104,7 +106,7 @@ class MixedEffectsModel(BaseEstimator):
             )
 
         # fixeffs and raneff_design can be callables:
-        self.fixeffs_, self.raneff_design_ = self._standardize_cols(X, self.fixeffs, self.raneff_design)
+        self.fixeffs_, self.raneff_design_ = self._standardize_cols(X, self.fixeffs, self.raneff_design, verbose)
 
         # initialize module:
         if reset or not self.module_:
@@ -115,15 +117,26 @@ class MixedEffectsModel(BaseEstimator):
         # build-model-mat:
         X, group_ids, y, sample_weight = self.build_model_mats(X, y)
 
-        self.partial_fit(X=X, y=y, group_ids=group_ids, sample_weight=sample_weight, max_num_epochs=None, **kwargs)
+        kwargs['prog'] = kwargs.get('prog', verbose)
+
+        self.partial_fit(
+            X=X,
+            y=y,
+            group_ids=group_ids,
+            sample_weight=sample_weight,
+            max_num_epochs=None,
+            **kwargs
+        )
         return self
 
     @classmethod
     def _standardize_cols(cls,
                           X: pd.DataFrame,
                           fixeffs: Sequence[Union[str, Callable]],
-                          raneff_design: Dict[str, Sequence[Union[str, Callable]]]
+                          raneff_design: Dict[str, Sequence[Union[str, Callable]]],
+                          verbose: bool = True
                           ) -> Tuple[Sequence[str], Dict[str, Sequence[str]]]:
+        any_callables = False
         standarized_cols = {}
         assert 'fixeffs' not in raneff_design
         for cat, to_standardize in {**raneff_design, **{'fixeffs': fixeffs}}:
@@ -131,13 +144,15 @@ class MixedEffectsModel(BaseEstimator):
                 standarized_cols[cat] = []
             for cols in to_standardize:
                 if callable(cols):
+                    any_callables = True
                     cols = cols(X)
                 if isinstance(cols, str):
                     cols = [cols]
                 standarized_cols[cat].extend(cols)
+        if any_callables and verbose:
+            print(f"Model-features: {standarized_cols}")
         fixeffs = standarized_cols.pop('fixeffs')
         return fixeffs, standarized_cols
-
 
     def partial_fit(self,
                     X: Union[np.ndarray, torch.Tensor],
