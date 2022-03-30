@@ -1,0 +1,2 @@
+class FitFailedException(RuntimeError):
+    pass

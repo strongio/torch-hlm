@@ -10,6 +10,7 @@ import numpy as np
 
 from ..utils import validate_1d_like, validate_tensors, validate_group_ids, get_yhat_r, pad_res_per_gf, get_to_kwargs
 from ...covariance import Covariance
+from ...utils import FitFailedException
 
 
 class MixedEffectsModule(torch.nn.Module):
@@ -121,8 +122,8 @@ class MixedEffectsModule(torch.nn.Module):
 
         covariance_matrix = self.covariance[grouping_factor]() * self.residual_var
         covariance_matrix = covariance_matrix + eps * torch.eye(len(covariance_matrix))
-        if torch.isnan(covariance_matrix).any():
-            raise RuntimeError("`nan`s in covariance")
+        if torch.isnan(covariance_matrix).any() or torch.isinf(covariance_matrix).any():
+            raise RuntimeError("`nan`/`infs`s in covariance")
 
         dist = None
         try:
@@ -312,8 +313,8 @@ class MixedEffectsModule(torch.nn.Module):
         def closure():
             optimizer.zero_grad()
             loss = self.get_loss(X, y, group_ids, loss_type=loss_type, cache=cache, weights=weights, **kwargs)
-            if torch.isnan(loss):
-                raise RuntimeError("Encountered `nan` loss in training.")
+            if torch.isnan(loss) or torch.isinf(loss):
+                raise FitFailedException("Encountered `nan`/inf loss in training.")
             loss.backward()
             for callback in callbacks:
                 callback(loss)

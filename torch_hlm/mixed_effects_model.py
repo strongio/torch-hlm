@@ -1,3 +1,8 @@
+import os
+from tenacity import retry, retry_if_exception_type, stop_after_attempt
+
+from torch_hlm.utils import FitFailedException
+
 try:
     from functools import cached_property
 except ImportError:
@@ -15,6 +20,8 @@ from tqdm.auto import tqdm
 
 from torch_hlm.mixed_effects_module import MixedEffectsModule
 from torch_hlm.mixed_effects_module.utils import get_to_kwargs, pad_res_per_gf
+
+N_FIT_RETRIES = int(os.getenv('HLM_N_FIT_RETRIES', 10))
 
 
 class MixedEffectsModel(BaseEstimator):
@@ -66,6 +73,7 @@ class MixedEffectsModel(BaseEstimator):
 
         self.module_ = None
         self.optimizer_ = None
+        self._fit_failed = 0
 
     @cached_property
     def all_model_mat_cols(self) -> Sequence:
@@ -84,6 +92,7 @@ class MixedEffectsModel(BaseEstimator):
     def grouping_factors(self) -> Sequence[str]:
         return list(self.raneff_design_.keys())
 
+    @retry(retry=retry_if_exception_type(FitFailedException), reraise=True, stop=stop_after_attempt(N_FIT_RETRIES + 1))
     def fit(self,
             X: Union[pd.DataFrame, np.ndarray],
             y: np.ndarray,
@@ -100,6 +109,12 @@ class MixedEffectsModel(BaseEstimator):
         :param kwargs: Further keyword-args to pass to ``partial_fit()``
         :return: This instance, now fitted.
         """
+        # tallying fit-failurs:
+        if self._fit_failed:
+            if verbose:
+                print(f"Retry attempt {self._fit_failed}/{N_FIT_RETRIES}")
+            reset = True
+
         if kwargs.get('sample_weight') is not None:
             raise ValueError(
                 f"Do not pass `sample_weight` to {type(self).__name__}.fit(); instead, add to last dim of ``y``."
@@ -119,14 +134,20 @@ class MixedEffectsModel(BaseEstimator):
 
         kwargs['prog'] = kwargs.get('prog', verbose)
 
-        self.partial_fit(
-            X=X,
-            y=y,
-            group_ids=group_ids,
-            sample_weight=sample_weight,
-            max_num_epochs=None,
-            **kwargs
-        )
+        try:
+            self.partial_fit(
+                X=X,
+                y=y,
+                group_ids=group_ids,
+                sample_weight=sample_weight,
+                max_num_epochs=None,
+                **kwargs
+            )
+        except FitFailedException as e:
+            self._fit_failed += 1
+            raise e
+
+        self._fit_failed = 0
         return self
 
     @classmethod
@@ -139,7 +160,7 @@ class MixedEffectsModel(BaseEstimator):
         any_callables = False
         standarized_cols = {}
         assert 'fixeffs' not in raneff_design
-        for cat, to_standardize in {**raneff_design, **{'fixeffs': fixeffs}}:
+        for cat, to_standardize in {**raneff_design, **{'fixeffs': fixeffs}}.items():
             if cat not in standarized_cols:
                 standarized_cols[cat] = []
             for cols in to_standardize:
@@ -255,6 +276,12 @@ class MixedEffectsModel(BaseEstimator):
                 if 'set_re_cov' in str(e) and 'known' in str(e):
                     raise RuntimeError("Pass known covariance(s) at init: ``MixedEffectsModel(covariance=t)``") from e
                 raise e
+            except ValueError as e:
+                msg = str(e)
+                if ('parameter' in msg) and ('nan' in msg or 'inf' in msg):
+                    raise FitFailedException(str(e))
+                else:
+                    raise e
 
             if stopping(epoch_loss):
                 print(f"Convergence reached: {stopping.get_info()}")

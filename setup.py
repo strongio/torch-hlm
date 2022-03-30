@@ -19,6 +19,7 @@ setuptools.setup(
         'scipy>=1.5.2',
         'scikit-learn>=0.23.2',
         'pandas>=1.0',
+        'tenacity',
         'backports.cached-property'  # TODO: only if python < 3.8
     ],
     extras_require={
