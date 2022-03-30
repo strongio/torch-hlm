@@ -19,9 +19,12 @@ from torch_hlm.mixed_effects_module.utils import get_to_kwargs, pad_res_per_gf
 
 class MixedEffectsModel(BaseEstimator):
     """
-    :param fixeffs: Sequence of column-names of the fixed-effects in the model-matrix ``X``.
+    :param fixeffs: Sequence of column-names of the fixed-effects in the model-matrix ``X``. Instead of string-
+     columns-names, can also supply callables which take the input pandas ``DataFrame`` and return a list of
+     column-names.
     :param raneff_design: A dictionary, whose key(s) are the names of grouping factors and whose values are
-     column-names for random-effects of that grouping factor.
+     column-names for random-effects of that grouping factor. As with ``fixeffs``, either string-column-names or
+     callables can be used.
     :param response_type: Currently supports 'binomial' or 'gaussian'.
     :param loss_type: How loss is calculated. The default behavior and available options vary depending on
      ``response_type``. To see the default, call ``model.module_._get_default_loss_type()`` after fit.
@@ -38,8 +41,8 @@ class MixedEffectsModel(BaseEstimator):
     """
 
     def __init__(self,
-                 fixeffs: Sequence[str],
-                 raneff_design: Dict[str, Sequence[str]],
+                 fixeffs: Sequence[Union[str, Callable]],
+                 raneff_design: Dict[str, Sequence[Union[str, Callable]]],
                  response_type: str = 'gaussian',
                  loss_type: Optional[str] = None,
                  fixed_effects_nn: Optional[torch.nn.Module] = None,
@@ -49,7 +52,9 @@ class MixedEffectsModel(BaseEstimator):
                  optimizer_kwargs: Optional[dict] = None):
 
         self.fixeffs = fixeffs
+        self.fixeffs_ = None
         self.raneff_design = raneff_design
+        self.raneff_design_ = None
         self.response_type = response_type
         self.loss_type = loss_type
 
@@ -65,9 +70,9 @@ class MixedEffectsModel(BaseEstimator):
     @cached_property
     def all_model_mat_cols(self) -> Sequence:
         # preserve the ordering where possible
-        assert len(self.fixeffs) == len(set(self.fixeffs)), "Duplicate `fixeffs`"
-        all_model_mat_cols = list(self.fixeffs)
-        for gf, gf_cols in self.raneff_design.items():
+        assert len(self.fixeffs_) == len(set(self.fixeffs_)), "Duplicate `fixeffs`"
+        all_model_mat_cols = list(self.fixeffs_)
+        for gf, gf_cols in self.raneff_design_.items():
             assert len(gf_cols) == len(set(gf_cols)), f"Duplicate cols for '{gf}'"
             for col in gf_cols:
                 if col in all_model_mat_cols:
@@ -77,7 +82,7 @@ class MixedEffectsModel(BaseEstimator):
 
     @property
     def grouping_factors(self) -> Sequence[str]:
-        return list(self.raneff_design.keys())
+        return list(self.raneff_design_.keys())
 
     def fit(self,
             X: Union[pd.DataFrame, np.ndarray],
@@ -98,6 +103,9 @@ class MixedEffectsModel(BaseEstimator):
                 f"Do not pass `sample_weight` to {type(self).__name__}.fit(); instead, add to last dim of ``y``."
             )
 
+        # fixeffs and raneff_design can be callables:
+        self.fixeffs_, self.raneff_design_ = self._standardize_cols(X, self.fixeffs, self.raneff_design)
+
         # initialize module:
         if reset or not self.module_:
             if reset == 'warn' and self.module_:
@@ -109,6 +117,27 @@ class MixedEffectsModel(BaseEstimator):
 
         self.partial_fit(X=X, y=y, group_ids=group_ids, sample_weight=sample_weight, max_num_epochs=None, **kwargs)
         return self
+
+    @classmethod
+    def _standardize_cols(cls,
+                          X: pd.DataFrame,
+                          fixeffs: Sequence[Union[str, Callable]],
+                          raneff_design: Dict[str, Sequence[Union[str, Callable]]]
+                          ) -> Tuple[Sequence[str], Dict[str, Sequence[str]]]:
+        standarized_cols = {}
+        assert 'fixeffs' not in raneff_design
+        for cat, to_standardize in {**raneff_design, **{'fixeffs': fixeffs}}:
+            if cat not in standarized_cols:
+                standarized_cols[cat] = []
+            for cols in to_standardize:
+                if callable(cols):
+                    cols = cols(X)
+                if isinstance(cols, str):
+                    cols = [cols]
+                standarized_cols[cat].extend(cols)
+        fixeffs = standarized_cols.pop('fixeffs')
+        return fixeffs, standarized_cols
+
 
     def partial_fit(self,
                     X: Union[np.ndarray, torch.Tensor],
@@ -283,10 +312,10 @@ class MixedEffectsModel(BaseEstimator):
         # organize model-mat indices. this works b/c it is sync'd with ``build_model_mats``, via ``all_model_mat_cols``.
         # might be a better way to make this dependency clearer...
         for i, col in enumerate(self.all_model_mat_cols):
-            for gf, gf_cols in self.raneff_design.items():
+            for gf, gf_cols in self.raneff_design_.items():
                 if col in gf_cols:
                     module_kwargs['raneff_features'][gf].append(i)
-            if col in self.fixeffs:
+            if col in self.fixeffs_:
                 module_kwargs['fixeff_features'].append(i)
 
         # initialize module:
