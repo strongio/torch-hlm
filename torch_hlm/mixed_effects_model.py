@@ -278,7 +278,7 @@ class MixedEffectsModel(BaseEstimator):
                 raise e
             except ValueError as e:
                 msg = str(e)
-                if ('parameter' in msg) and ('nan' in msg or 'inf' in msg):
+                if ('parameter' in msg or 'covariance' in msg) and ('nan' in msg or 'inf' in msg) or ('posdef' in msg):
                     raise FitFailedException(str(e))
                 else:
                     raise e

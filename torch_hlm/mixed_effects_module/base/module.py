@@ -123,7 +123,7 @@ class MixedEffectsModule(torch.nn.Module):
         covariance_matrix = self.covariance[grouping_factor]() * self.residual_var
         covariance_matrix = covariance_matrix + eps * torch.eye(len(covariance_matrix))
         if torch.isnan(covariance_matrix).any() or torch.isinf(covariance_matrix).any():
-            raise RuntimeError("`nan`/`infs`s in covariance")
+            raise ValueError("`nan`/`infs`s in covariance")
 
         dist = None
         try:
@@ -139,7 +139,7 @@ class MixedEffectsModule(torch.nn.Module):
                         warn(f"{msg}, increasing 10x")
                     return self.re_distribution(grouping_factor, eps=eps * 5)
                 else:
-                    raise RuntimeError(msg) from e
+                    raise ValueError(msg) from e
         return dist
 
     # forward / re-solve -------
