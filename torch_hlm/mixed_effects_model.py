@@ -127,12 +127,14 @@ class MixedEffectsModel(BaseEstimator):
         if reset or not self.module_:
             if reset == 'warn' and self.module_:
                 warn("Resetting module.")
-            self._initialize_module()
+            self.module_ = self._initialize_module()
+            self.optimizer_ = None
 
         # build-model-mat:
         X, group_ids, y, sample_weight = self.build_model_mats(X, y)
 
         kwargs['prog'] = kwargs.get('prog', verbose)
+        kwargs['max_num_epochs'] = kwargs.get('max_num_epochs',None)
 
         try:
             self.partial_fit(
@@ -140,7 +142,6 @@ class MixedEffectsModel(BaseEstimator):
                 y=y,
                 group_ids=group_ids,
                 sample_weight=sample_weight,
-                max_num_epochs=None,
                 **kwargs
             )
         except FitFailedException as e:
@@ -163,11 +164,15 @@ class MixedEffectsModel(BaseEstimator):
         for cat, to_standardize in {**raneff_design, **{'fixeffs': fixeffs}}.items():
             if cat not in standarized_cols:
                 standarized_cols[cat] = []
-            for cols in to_standardize:
+            for i,cols in enumerate(to_standardize):
                 if callable(cols):
                     any_callables = True
                     cols = cols(X)
+                    if not cols:
+                        warn(f"Element {i} of {cat} was a callable that, when given X, returned no rows.")
                 if isinstance(cols, str):
+                    if cols not in X.columns:
+                        raise RuntimeError(f"No column named {cols}")
                     cols = [cols]
                 standarized_cols[cat].extend(cols)
         if any_callables and verbose:
@@ -184,6 +189,7 @@ class MixedEffectsModel(BaseEstimator):
                     callbacks: Collection[Callable] = (),
                     prog: bool = True,
                     max_num_epochs: Optional[int] = 1,
+                    min_num_epochs: int = 0,
                     clip_grad: Optional[float] = 2.0,
                     **kwargs) -> 'MixedEffectsModel':
         """
@@ -201,6 +207,7 @@ class MixedEffectsModel(BaseEstimator):
         :param max_num_epochs: The maximum number of epochs to fit. For similarity to other sklearn estimator's
          ``partial_fit()`` behavior, this default to 1, so that a single call to ``partial_fit()`` performs a single
          epoch.
+        :param min_num_epochs: TODO
         :param clip_grad: TODO
         :param kwargs: Further keyword arguments passed to ``MixedEffectsModule.fit_loop()``
         :return: This instance
@@ -284,14 +291,16 @@ class MixedEffectsModel(BaseEstimator):
                     raise e
 
             if stopping(epoch_loss):
-                print(f"Convergence reached: {stopping.get_info()}")
                 break
 
             epoch += 1
             if epoch >= max_num_epochs:
                 if max_num_epochs > 1:
-                    print("Reached `max_num_epochs`, stopping.")
+                    warn(f"Reached `max_num_epochs={max_num_epochs}`, stopping.")
                 break
+
+        if epoch < min_num_epochs:
+            raise FitFailedException(f"Terminated on epoch={epoch}, but min_num_epochs={min_num_epochs}")
 
         return self
 
