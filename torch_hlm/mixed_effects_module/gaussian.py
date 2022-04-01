@@ -78,7 +78,7 @@ class GaussianReSolver(ReSolver):
             yoff = (y - offset)
             Xty_els = X * yoff.unsqueeze(1) * weights.unsqueeze(1)
             Xty = torch.zeros(num_groups, num_res).scatter_add(0, group_ids_broad, Xty_els)
-            return torch.lingalg.solve(XtX + prior_precision, Xty.unsqueeze(-1)).squeeze(-1)
+            return torch.linalg.solve(XtX + prior_precision, Xty.unsqueeze(-1)).squeeze(-1)
 
     @staticmethod
     def _get_hessian(
