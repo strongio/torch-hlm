@@ -6,7 +6,7 @@ setuptools.setup(
     name='torch_hlm',
     version=__version__,
     description='Hierarchical Models in PyTorch',
-    url='http://github.com/strongio/torch_hlm',
+    url='https://github.com/strongio/torch_hlm',
     author='Jacob Dink',
     author_email='jacob.dink@strong.io',
     license='MIT',

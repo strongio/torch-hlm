@@ -1,6 +1,7 @@
 import os
 from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
+from torch_hlm.hessian import hessian
 from torch_hlm.utils import FitFailedException
 
 try:
@@ -134,7 +135,7 @@ class MixedEffectsModel(BaseEstimator):
         X, group_ids, y, sample_weight = self.build_model_mats(X, y)
 
         kwargs['prog'] = kwargs.get('prog', verbose)
-        kwargs['max_num_epochs'] = kwargs.get('max_num_epochs',None)
+        kwargs['max_num_epochs'] = kwargs.get('max_num_epochs', None)
 
         try:
             self.partial_fit(
@@ -164,12 +165,14 @@ class MixedEffectsModel(BaseEstimator):
         for cat, to_standardize in {**raneff_design, **{'fixeffs': fixeffs}}.items():
             if cat not in standarized_cols:
                 standarized_cols[cat] = []
-            for i,cols in enumerate(to_standardize):
+            for i, cols in enumerate(to_standardize):
                 if callable(cols):
                     any_callables = True
                     cols = cols(X)
                     if not cols:
                         warn(f"Element {i} of {cat} was a callable that, when given X, returned no rows.")
+                    # callables might have overlapping matches, drop dupes
+                    cols = [c for c in cols if c not in standarized_cols[cat]]
                 if isinstance(cols, str):
                     if cols not in X.columns:
                         raise RuntimeError(f"No column named {cols}")
@@ -418,6 +421,7 @@ class MixedEffectsModel(BaseEstimator):
          Default is to "zero"-out the random-effects, which means only fixed-effects will be used. Other options are
          "nan" (return `nan`s for these) or "raise" (raise an exception). Can prefix the first two options with "quiet"
          to suppress printing the number of unknown groups.
+        :param kwargs: Other keyword arguments passed to ``module_.get_res()``.
         :return: An ndarray of predictions
         """
         if 'verbose' not in kwargs:
@@ -456,6 +460,25 @@ class MixedEffectsModel(BaseEstimator):
         dist = self.module_.predict_distribution_mode(X, group_ids=group_ids, res_per_gf=res_per_gf_padded)
         pred = getattr(dist, type)
         return pred.numpy()
+
+    def _estimate_laplace_coefs(self,
+                                X: Union[pd.DataFrame, np.ndarray],
+                                y: Union[pd.DataFrame, np.ndarray],
+                                parameters: Optional[Sequence[torch.Tensor]] = None,
+                                **kwargs
+                                ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        if parameters is None:
+            parameters = self.module_.parameters()
+        parameters = list(parameters)
+        means = torch.cat([p.reshape(-1) for p in parameters])
+
+        X, group_ids, y, weights = self.build_model_mats(X, y)
+
+        loss = self.module_.get_loss(X, y, group_ids, loss_type=self.loss_type, weights=weights, reduce=False, **kwargs)
+        hess = hessian(output=loss, inputs=parameters, allow_unused=True, progress=False)
+
+        return means, hess
 
 
 class Stopping:
