@@ -287,8 +287,8 @@ class MixedEffectsModel(BaseEstimator):
                     raise RuntimeError("Pass known covariance(s) at init: ``MixedEffectsModel(covariance=t)``") from e
                 raise e
             except ValueError as e:
-                msg = str(e)
-                if ('parameter' in msg or 'covariance' in msg) and ('nan' in msg or 'inf' in msg) or ('posdef' in msg):
+                msg = str(e).lower()
+                if ('param' in msg or 'cov' in msg) and ('nan' in msg or 'inf' in msg or 'positive' in msg):
                     raise FitFailedException(str(e))
                 else:
                     raise e

@@ -126,6 +126,7 @@ class MixedEffectsModule(torch.nn.Module):
             raise ValueError("`nan`/`infs`s in covariance")
 
         dist = None
+        # TODO: move torch_hlm.mixed_effects_module.gaussian._mvnorm_eps to common module and use that
         try:
             dist = torch.distributions.MultivariateNormal(
                 loc=torch.zeros(len(covariance_matrix)), covariance_matrix=covariance_matrix,
@@ -133,7 +134,7 @@ class MixedEffectsModule(torch.nn.Module):
             )
         except (ValueError, RuntimeError) as e:
             if dist is None:
-                msg = f"eps of {eps} insufficient to ensure posdef covariance matrix for gf={grouping_factor}"
+                msg = f"eps of {eps} insufficient to ensure positive-definite cov-matrix for gf={grouping_factor}"
                 if eps <= .1:
                     if eps > 1e-04:
                         warn(f"{msg}, increasing 10x")
