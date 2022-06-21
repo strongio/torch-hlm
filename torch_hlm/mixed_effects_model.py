@@ -171,8 +171,8 @@ class MixedEffectsModel(BaseEstimator):
                     cols = cols(X)
                     if not cols:
                         warn(f"Element {i} of {cat} was a callable that, when given X, returned no rows.")
-                    # callables might have overlapping matches, drop dupes
-                    cols = [c for c in cols if c not in standarized_cols[cat]]
+                    # (1) callables might have overlapping matches, drop dupes, (2) don't include grouping factor
+                    cols = [c for c in cols if c not in standarized_cols[cat] and c not in raneff_design]
                 if isinstance(cols, str):
                     if cols not in X.columns:
                         raise RuntimeError(f"No column named {cols}")
